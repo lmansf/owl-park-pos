@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reports — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+  .tabs button {
+    background: var(--panel-2); color: var(--muted); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 14px; font: inherit; cursor: pointer;
+  }
+  .tabs button.active { color: #fff; border-color: var(--accent); background: var(--panel); }
+  .filters { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px; }
+  .filters label.op-field { margin-bottom: 0; }
+  .report-section { margin-bottom: 20px; }
+  .report-section h3 { margin: 0 0 10px; font-size: 15px; }
+  .op-table tr.totals td {
+    font-weight: 700; border-top: 2px solid var(--line); border-bottom: none;
+  }
+  .table-scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="op-card">
+    <h2>Reports</h2>
+    <div class="tabs" id="tabs"></div>
+    <div class="filters">
+      <label class="op-field"><span>From</span><input type="date" id="from"></label>
+      <label class="op-field"><span>To</span><input type="date" id="to"></label>
+      <button class="op-btn" id="run">Run</button>
+      <a class="op-btn secondary" id="csv" href="#" download>Download CSV</a>
+    </div>
+    <div id="out"><p class="op-muted">Loading…</p></div>
+  </div>
+</main>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  const me = await op.init({ page: '/reports.html' });
+  if (!me) return;
+
+  const TABS = [
+    { id: 'sales', label: 'Sales summary' },
+    { id: 'product-mix', label: 'Product mix' },
+    { id: 'admissions', label: 'Admissions' },
+    { id: 'memberships', label: 'Memberships' },
+  ];
+  let tab = 'sales';
+
+  const fromEl = document.getElementById('from');
+  const toEl = document.getElementById('to');
+  const out = document.getElementById('out');
+  const csvLink = document.getElementById('csv');
+
+  // default range: last 14 days (local)
+  const pad = (n) => String(n).padStart(2, '0');
+  const dstr = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const today = new Date();
+  toEl.value = dstr(today);
+  fromEl.value = dstr(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 13));
+
+  const tabsEl = document.getElementById('tabs');
+  tabsEl.innerHTML = TABS.map((t) =>
+    `<button data-tab="${t.id}">${op.esc(t.label)}</button>`).join('');
+  tabsEl.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-tab]');
+    if (!b) return;
+    tab = b.dataset.tab;
+    run();
+  });
+
+  function url(format) {
+    const q = new URLSearchParams({ from: fromEl.value, to: toEl.value });
+    if (format) q.set('format', format);
+    return `/api/reports/${tab}?${q}`;
+  }
+
+  function colLabel(c) {
+    return c.replace(/_cents$/, ' ($)').replace(/_pct$/, ' %').replace(/_/g, ' ');
+  }
+  function fmtCell(col, v) {
+    if (v === '' || v === null || v === undefined) return '';
+    if (/_cents$/.test(col)) return op.money(v);
+    if (/_pct$/.test(col)) return `${v}%`;
+    return String(v);
+  }
+  const isNum = (col) => /_cents$|_pct$/.test(col) ||
+    !['date', 'channel', 'product', 'sku', 'kind', 'gate', 'program'].includes(col);
+
+  function renderSection(s) {
+    const head = s.columns.map((c) =>
+      `<th class="${isNum(c) ? 'num' : ''}">${op.esc(colLabel(c))}</th>`).join('');
+    const body = s.rows.map((r) =>
+      `<tr>${s.columns.map((c) =>
+        `<td class="${isNum(c) ? 'num' : ''}">${op.esc(fmtCell(c, r[c]))}</td>`).join('')}</tr>`
+    ).join('') || `<tr><td colspan="${s.columns.length}" class="op-muted">No data in this range.</td></tr>`;
+    const totals = s.totals
+      ? `<tr class="totals">${s.columns.map((c) =>
+          `<td class="${isNum(c) ? 'num' : ''}">${op.esc(fmtCell(c, s.totals[c]))}</td>`).join('')}</tr>`
+      : '';
+    return `<div class="report-section">
+      ${s.title ? `<h3>${op.esc(s.title)}</h3>` : ''}
+      <div class="table-scroll">
+        <table class="op-table"><thead><tr>${head}</tr></thead>
+        <tbody>${body}${totals}</tbody></table>
+      </div>
+    </div>`;
+  }
+
+  async function run() {
+    for (const b of tabsEl.querySelectorAll('button')) {
+      b.classList.toggle('active', b.dataset.tab === tab);
+    }
+    csvLink.href = url('csv');
+    out.innerHTML = '<p class="op-muted">Loading…</p>';
+    let report;
+    try { report = await op.api(url()); } catch { out.innerHTML = ''; return; }
+    out.innerHTML =
+      `<p class="op-muted">${op.esc(report.range.from)} → ${op.esc(report.range.to)}</p>` +
+      report.sections.map(renderSection).join('');
+  }
+
+  document.getElementById('run').addEventListener('click', run);
+  await run();
+})();
+</script>
+</body>
+</html>

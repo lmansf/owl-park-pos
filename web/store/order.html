@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Find my order — Owl Park</title>
+<link rel="stylesheet" href="/store/store.css">
+</head>
+<body>
+<main class="st-main">
+  <h1 class="st-noprint">Find my order</h1>
+  <div class="st-panel st-noprint" id="lookup">
+    <p class="st-muted">Enter the order code from your confirmation (looks like
+      <strong>W-XXXXXXXXX</strong>) and the email you used at checkout.</p>
+    <form id="lookup-form" style="display:flex;gap:10px;flex-wrap:wrap">
+      <input id="lk-code" placeholder="W-XXXXXXXXX" required style="flex:1;min-width:150px">
+      <input id="lk-email" type="email" placeholder="you@example.com" required style="flex:2;min-width:200px">
+      <button class="st-btn">Find order</button>
+    </form>
+  </div>
+  <div id="error"></div>
+  <div id="order"></div>
+  <p class="st-noprint" id="actions" style="display:none">
+    <button class="st-btn" onclick="window.print()">Print tickets</button>
+  </p>
+</main>
+
+<script src="/store/store.js"></script>
+<script src="/lib/barcode.js"></script>
+<script>
+'use strict';
+gs.init('order');
+
+async function lookup(code, email) {
+  const errBox = document.getElementById('error');
+  errBox.innerHTML = '';
+  document.getElementById('order').innerHTML = '';
+  document.getElementById('actions').style.display = 'none';
+  try {
+    const { order } = await gs.api(
+      `/api/store/order?code=${encodeURIComponent(code)}&email=${encodeURIComponent(email)}`
+    );
+    gs.renderOrder(order, document.getElementById('order'));
+    document.getElementById('actions').style.display = '';
+  } catch (err) {
+    errBox.innerHTML =
+      '<div class="st-error">No order matches that code and email. Check both and try again.</div>';
+  }
+}
+
+document.getElementById('lookup-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  lookup(document.getElementById('lk-code').value.trim(),
+         document.getElementById('lk-email').value.trim());
+});
+
+// Deep link support: /store/order.html?code=W-…&email=…
+const q = new URLSearchParams(location.search);
+if (q.get('code') && q.get('email')) {
+  document.getElementById('lk-code').value = q.get('code');
+  document.getElementById('lk-email').value = q.get('email');
+  lookup(q.get('code'), q.get('email'));
+}
+</script>
+</body>
+</html>

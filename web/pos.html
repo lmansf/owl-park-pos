@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>POS — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .pos-tabs { display: flex; gap: 8px; margin: 0 0 16px; }
+  .pos-tabs button {
+    background: var(--panel-2); color: var(--muted); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 20px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .pos-tabs button.active { color: #fff; border-color: var(--accent); background: var(--panel); }
+
+  .pos-sell { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; }
+  .pos-kind h3 { margin: 14px 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+  .pos-products { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .pos-prod {
+    min-height: 78px; background: var(--panel); border: 1px solid var(--line); color: var(--text);
+    border-radius: var(--radius); padding: 10px 12px; font: inherit; cursor: pointer;
+    display: flex; flex-direction: column; justify-content: space-between; text-align: left;
+  }
+  .pos-prod:hover { border-color: var(--accent); }
+  .pos-prod .price { color: var(--accent); font-weight: 700; }
+  .pos-prod .name { font-weight: 600; }
+
+  .pos-cart { position: sticky; top: 68px; }
+  .cart-line { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .cart-line .desc { flex: 1; min-width: 0; }
+  .cart-line .desc small { display: block; color: var(--muted); }
+  .cart-line .qty-btn {
+    width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); font: inherit; font-size: 17px; cursor: pointer;
+  }
+  .cart-line .qty { min-width: 24px; text-align: center; font-weight: 700; }
+  .cart-line .amt { min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
+  .cart-totals { margin-top: 10px; font-variant-numeric: tabular-nums; }
+  .cart-totals div { display: flex; justify-content: space-between; padding: 2px 0; }
+  .cart-totals .grand { font-size: 20px; font-weight: 700; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 8px; }
+  .disc-row { display: flex; gap: 8px; margin-top: 10px; }
+  .disc-row input { flex: 1; min-width: 0; }
+  .cust-row { display: flex; gap: 8px; margin-top: 8px; }
+  .cust-row input { flex: 1; min-width: 0; }
+
+  .sess-day h4 { margin: 12px 0 6px; }
+  .sess-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+  .sess-btn {
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 8px; padding: 8px; font: inherit; cursor: pointer;
+  }
+  .sess-btn:hover:not(:disabled) { border-color: var(--accent); }
+  .sess-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .sess-btn small { display: block; color: var(--muted); }
+
+  .member-result { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; cursor: pointer; }
+  .member-result:hover { border-color: var(--accent); }
+  .member-result small { color: var(--muted); display: block; }
+
+  .tender-quick { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+  .tender-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .tender-row input { width: 120px; }
+  .tender-list div { display: flex; justify-content: space-between; padding: 4px 0; }
+  .tender-sum { font-variant-numeric: tabular-nums; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .tender-sum div { display: flex; justify-content: space-between; }
+  .tender-sum .due { font-size: 20px; font-weight: 700; }
+  .tender-sum .change-ok { color: var(--ok); font-weight: 700; }
+
+  /* receipt + stubs render paper-like even on screen */
+  .paper { background: #fff; color: #111; border-radius: 8px; padding: 20px 24px; max-width: 420px; margin: 0 auto 18px; }
+  .paper h3 { margin: 0 0 2px; }
+  .paper .mono { font-family: ui-monospace, monospace; }
+  .paper table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .paper td { padding: 3px 0; vertical-align: top; }
+  .paper td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .paper .rule { border-top: 1px dashed #999; margin: 8px 0; }
+  .paper .grand { font-size: 17px; font-weight: 700; }
+  .paper .muted { color: #666; font-size: 12px; }
+  .stub .code-wrap { text-align: center; margin-top: 10px; }
+  .stub .holder { border-bottom: 1px solid #999; min-height: 20px; }
+  .receipt-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-bottom: 16px; }
+
+  @media print {
+    .no-print { display: none !important; }
+    .op-main { max-width: none; padding: 0; }
+    .paper { max-width: none; border-radius: 0; padding: 0; }
+    .print-block { page-break-after: always; }
+  }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="pos-tabs no-print">
+    <button id="tab-sell" class="active">Sell</button>
+    <button id="tab-orders">Orders</button>
+  </div>
+
+  <!-- SELL -->
+  <section id="view-sell" class="pos-sell no-print">
+    <div id="product-grid"></div>
+    <aside class="op-card pos-cart">
+      <h2>Cart</h2>
+      <div id="cart-lines"><p class="op-muted">Tap products to add them.</p></div>
+      <div class="disc-row">
+        <input id="disc-code" placeholder="Discount code">
+        <button class="op-btn secondary" id="btn-disc">Apply</button>
+      </div>
+      <div id="disc-applied"></div>
+      <div class="cust-row">
+        <input id="cust-name" placeholder="Customer name (optional)">
+        <input id="cust-email" placeholder="Email (optional)">
+      </div>
+      <div class="cart-totals" id="cart-totals"></div>
+      <div style="display:flex; gap:8px; margin-top:12px">
+        <button class="op-btn big ok" id="btn-tender" style="flex:1" disabled>TENDER</button>
+        <button class="op-btn secondary" id="btn-clear">Clear</button>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ORDERS -->
+  <section id="view-orders" class="no-print" hidden>
+    <div class="op-card">
+      <h2>Order search</h2>
+      <div style="display:flex; gap:8px; margin-bottom:12px">
+        <input id="order-q" placeholder="Confirmation, customer name or email" style="flex:1">
+        <button class="op-btn" id="btn-order-search">Search</button>
+      </div>
+      <table class="op-table"><thead><tr>
+        <th>Confirmation</th><th>Created</th><th>Customer</th><th>Channel</th>
+        <th class="num">Total</th><th>Status</th>
+      </tr></thead><tbody id="order-rows"></tbody></table>
+    </div>
+  </section>
+
+  <!-- RECEIPT -->
+  <section id="view-receipt" hidden>
+    <div class="receipt-actions no-print" id="receipt-actions"></div>
+    <div id="receipt"></div>
+  </section>
+</main>
+
+<dialog class="op-modal" id="dlg-session">
+  <h2 id="sess-title">Pick a session</h2>
+  <div id="sess-list" style="max-height:50vh; overflow:auto"></div>
+  <div class="op-right" style="margin-top:12px">
+    <button class="op-btn secondary" id="sess-cancel">Cancel</button>
+  </div>
+</dialog>
+
+<dialog class="op-modal" id="dlg-member">
+  <h2 id="mem-title">Membership details</h2>
+  <p class="op-muted">Search to renew an existing member, or enter details for a new one.</p>
+  <div style="display:flex; gap:8px">
+    <input id="mem-q" placeholder="Search members (name, email, member #)" style="flex:1">
+    <button class="op-btn secondary" id="mem-search">Search</button>
+  </div>
+  <div id="mem-results" style="max-height:30vh; overflow:auto"></div>
+  <div id="mem-selected" style="margin:10px 0"></div>
+  <label class="op-field" style="margin-top:10px"><span>Member name</span>
+    <input id="mem-name" style="width:100%"></label>
+  <label class="op-field"><span>Member email</span>
+    <input id="mem-email" style="width:100%"></label>
+  <div class="op-right" style="display:flex; gap:8px; justify-content:flex-end">
+    <button class="op-btn secondary" id="mem-cancel">Cancel</button>
+    <button class="op-btn" id="mem-add">Add to cart</button>
+  </div>
+</dialog>
+
+<dialog class="op-modal" id="dlg-tender">
+  <h2>Tender</h2>
+  <div class="tender-sum"><div class="due"><span>Total due</span><span id="tender-total"></span></div></div>
+  <div class="rule" style="margin:10px 0; border-top:1px solid var(--line)"></div>
+  <div class="tender-row">
+    <span style="width:44px">Cash</span>
+    <input id="cash-amt" inputmode="decimal" placeholder="0.00">
+    <button class="op-btn secondary" id="add-cash">Add cash</button>
+  </div>
+  <div class="tender-quick" id="quick-bills"></div>
+  <div class="tender-row">
+    <span style="width:44px">Card</span>
+    <input id="card-amt" inputmode="decimal" placeholder="0.00">
+    <button class="op-btn secondary" id="add-card">Add card</button>
+  </div>
+  <div class="tender-list" id="tender-list"></div>
+  <div class="tender-sum">
+    <div><span>Tendered</span><span id="tender-sum"></span></div>
+    <div><span>Remaining</span><span id="tender-remaining"></span></div>
+    <div class="change-ok"><span>Change</span><span id="tender-change"></span></div>
+  </div>
+  <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px">
+    <button class="op-btn secondary" id="tender-cancel">Cancel</button>
+    <button class="op-btn ok big" id="tender-finalize" disabled>Finalize</button>
+  </div>
+</dialog>
+
+<script src="/shell.js"></script>
+<script src="/lib/barcode.js"></script>
+<script>
+(async () => {
+  const me = await op.init({ page: '/pos.html' });
+  if (!me) return;
+  const isManager = me.role === 'admin' || me.role === 'manager';
+  const $ = (id) => document.getElementById(id);
+
+  // ---------- state ----------
+  let products = [];
+  let cart = [];            // {product, qty, session:{id,starts_at}|null, member|null}
+  let discount = null;      // validated discounts row
+  let currentOrder = null;  // open order awaiting tender
+  let receiptFrom = 'sell'; // 'sell' | 'orders'
+
+  // ---------- helpers ----------
+  const money = op.money, esc = op.esc;
+  function computeTotals() {
+    // mirrors server pricing exactly (proportional discount, per-line tax)
+    const lines = cart.map((l) => ({ gross: l.qty * l.product.price_cents, rate: l.product.tax_rate_bp }));
+    const subtotal = lines.reduce((a, l) => a + l.gross, 0);
+    const D = !discount ? 0
+      : discount.kind === 'percent' ? Math.round(subtotal * discount.value / 100)
+      : Math.min(discount.value, subtotal);
+    let remD = D, remSub = subtotal, tax = 0;
+    for (const l of lines) {
+      const d = remSub > 0 ? Math.round(remD * l.gross / remSub) : 0;
+      remD -= d; remSub -= l.gross;
+      tax += Math.round((l.gross - d) * l.rate / 10000);
+    }
+    return { subtotal, discount: D, tax, total: subtotal - D + tax };
+  }
+
+  // ---------- views ----------
+  function show(view) {
+    $('view-sell').hidden = view !== 'sell';
+    $('view-orders').hidden = view !== 'orders';
+    $('view-receipt').hidden = view !== 'receipt';
+    $('tab-sell').classList.toggle('active', view === 'sell');
+    $('tab-orders').classList.toggle('active', view === 'orders');
+  }
+  $('tab-sell').onclick = () => show('sell');
+  $('tab-orders').onclick = () => { show('orders'); searchOrders(); };
+
+  // ---------- product grid ----------
+  async function loadProducts() {
+    products = (await op.api('/api/catalog/sellable?channel=pos')).products;
+    const kinds = [['ticket', 'Tickets'], ['membership', 'Memberships'], ['addon', 'Add-ons']];
+    $('product-grid').innerHTML = kinds
+      .filter(([k]) => products.some((p) => p.kind === k))
+      .map(([k, label]) => `
+        <div class="pos-kind"><h3>${label}</h3>
+          <div class="pos-products">${products.filter((p) => p.kind === k).map((p) => `
+            <button class="pos-prod" data-id="${p.id}">
+              <span class="name">${esc(p.name)}</span>
+              <span class="price">${money(p.price_cents)}</span>
+            </button>`).join('')}
+          </div></div>`).join('');
+    for (const btn of document.querySelectorAll('.pos-prod')) {
+      btn.onclick = () => tapProduct(products.find((p) => p.id === Number(btn.dataset.id)));
+    }
+  }
+
+  function tapProduct(p) {
+    if (p.event_id != null) return pickSession(p);
+    if (p.kind === 'membership') return memberPrompt(p);
+    addLine(p, null, null);
+  }
+
+  function addLine(product, session, member) {
+    const existing = cart.find((l) =>
+      l.product.id === product.id &&
+      (l.session?.id ?? null) === (session?.id ?? null) &&
+      !l.member && !member);
+    if (existing) existing.qty++;
+    else cart.push({ product, qty: 1, session, member });
+    renderCart();
+  }
+
+  // ---------- cart ----------
+  function renderCart() {
+    const box = $('cart-lines');
+    if (!cart.length) {
+      box.innerHTML = '<p class="op-muted">Tap products to add them.</p>';
+    } else {
+      box.innerHTML = cart.map((l, i) => `
+        <div class="cart-line">
+          <div class="desc">${esc(l.product.name)}
+            ${l.session ? `<small>${op.fmtDate(l.session.starts_at)} ${op.fmtTime(l.session.starts_at)}</small>` : ''}
+            ${l.member ? `<small>${esc(l.member.label)}</small>` : ''}
+          </div>
+          <button class="qty-btn" data-i="${i}" data-d="-1">−</button>
+          <span class="qty">${l.qty}</span>
+          <button class="qty-btn" data-i="${i}" data-d="1">+</button>
+          <span class="amt">${money(l.qty * l.product.price_cents)}</span>
+        </div>`).join('');
+      for (const b of box.querySelectorAll('.qty-btn')) {
+        b.onclick = () => {
+          const l = cart[Number(b.dataset.i)];
+          l.qty += Number(b.dataset.d);
+          if (l.qty <= 0) cart.splice(Number(b.dataset.i), 1);
+          renderCart();
+        };
+      }
+    }
+    const t = computeTotals();
+    $('cart-totals').innerHTML = `
+      <div><span>Subtotal</span><span>${money(t.subtotal)}</span></div>
+      ${t.discount ? `<div><span>Discount (${esc(discount.code)})</span><span>−${money(t.discount)}</span></div>` : ''}
+      <div><span>Tax</span><span>${money(t.tax)}</span></div>
+      <div class="grand"><span>Total</span><span>${money(t.total)}</span></div>`;
+    $('btn-tender').disabled = !cart.length;
+  }
+
+  $('btn-clear').onclick = () => {
+    cart = []; discount = null; currentOrder = null;
+    $('disc-applied').textContent = ''; $('disc-code').value = '';
+    $('cust-name').value = ''; $('cust-email').value = '';
+    renderCart();
+  };
+
+  $('btn-disc').onclick = async () => {
+    const code = $('disc-code').value.trim();
+    if (!code) { discount = null; $('disc-applied').textContent = ''; renderCart(); return; }
+    try {
+      discount = (await op.api('/api/catalog/discounts/validate', { body: { code } })).discount;
+      $('disc-applied').innerHTML = `<span class="op-badge ok">${esc(discount.code)} — ${esc(discount.name)}</span>`;
+      renderCart();
+    } catch { discount = null; $('disc-applied').textContent = ''; renderCart(); }
+  };
+
+  // ---------- session picker ----------
+  const dlgSess = $('dlg-session');
+  $('sess-cancel').onclick = () => dlgSess.close();
+  async function pickSession(product) {
+    const pad = (n) => String(n).padStart(2, '0');
+    const dstr = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const from = new Date(); const to = new Date(Date.now() + 14 * (24 * 3600 * 1000));
+    $('sess-title').textContent = `${product.name} — pick a session`;
+    $('sess-list').innerHTML = '<p class="op-muted">Loading…</p>';
+    dlgSess.showModal();
+    const { sessions } = await op.api(`/api/events/${product.event_id}/sessions?from=${dstr(from)}&to=${dstr(to)}`);
+    const upcoming = sessions.filter((s) => Date.parse(s.starts_at) > Date.now() - 30 * 60_000);
+    if (!upcoming.length) { $('sess-list').innerHTML = '<p class="op-muted">No upcoming sessions in the next 14 days.</p>'; return; }
+    const byDay = {};
+    for (const s of upcoming) (byDay[op.fmtDate(s.starts_at)] ||= []).push(s);
+    $('sess-list').innerHTML = Object.entries(byDay).map(([day, list]) => `
+      <div class="sess-day"><h4>${day}</h4><div class="sess-grid">${list.map((s) => `
+        <button class="sess-btn" data-id="${s.id}" ${s.sold_out ? 'disabled' : ''}>
+          ${op.fmtTime(s.starts_at)}<small>${s.sold_out ? 'sold out' : s.remaining + ' left'}</small>
+        </button>`).join('')}</div></div>`).join('');
+    for (const b of $('sess-list').querySelectorAll('.sess-btn:not(:disabled)')) {
+      b.onclick = () => {
+        const s = upcoming.find((x) => x.id === Number(b.dataset.id));
+        dlgSess.close();
+        addLine(product, { id: s.id, starts_at: s.starts_at }, null);
+      };
+    }
+  }
+
+  // ---------- membership prompt ----------
+  const dlgMem = $('dlg-member');
+  let memProduct = null, memSelected = null;
+  $('mem-cancel').onclick = () => dlgMem.close();
+  function memberPrompt(product) {
+    memProduct = product; memSelected = null;
+    $('mem-title').textContent = product.name;
+    $('mem-q').value = ''; $('mem-results').innerHTML = ''; $('mem-selected').innerHTML = '';
+    $('mem-name').value = $('cust-name').value; $('mem-email').value = $('cust-email').value;
+    dlgMem.showModal();
+  }
+  async function memSearch() {
+    const q = $('mem-q').value.trim();
+    if (!q) return;
+    const { members } = await op.api('/api/membership/members?q=' + encodeURIComponent(q));
+    $('mem-results').innerHTML = members.length
+      ? members.map((m) => `
+          <div class="member-result" data-id="${m.id}">
+            <strong>${esc(m.name)}</strong> · ${esc(m.member_no)}
+            <small>${esc(m.email)} — ${esc(m.program_name)}, expires ${op.fmtDate(m.expires_at)}</small>
+          </div>`).join('')
+      : '<p class="op-muted">No members found.</p>';
+    for (const el of $('mem-results').querySelectorAll('.member-result')) {
+      el.onclick = () => {
+        const m = members.find((x) => x.id === Number(el.dataset.id));
+        memSelected = m;
+        $('mem-name').value = m.name; $('mem-email').value = m.email;
+        $('mem-selected').innerHTML =
+          `<span class="op-badge ok">Renewal: ${esc(m.member_no)} — ${esc(m.name)}</span>
+           <button class="op-btn secondary" id="mem-clear" style="padding:2px 10px">clear</button>`;
+        $('mem-clear').onclick = () => { memSelected = null; $('mem-selected').innerHTML = ''; };
+      };
+    }
+  }
+  $('mem-search').onclick = memSearch;
+  $('mem-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); memSearch(); } });
+  $('mem-add').onclick = () => {
+    const name = $('mem-name').value.trim(), email = $('mem-email').value.trim();
+    if (!memSelected && !name) { op.toast('Enter a member name (or pick a member to renew)', 'err'); return; }
+    const member = memSelected
+      ? { member_id: memSelected.id, label: `Renewal: ${memSelected.member_no} ${memSelected.name}` }
+      : { name, email, label: `For: ${name}${email ? ' <' + email + '>' : ''}` };
+    dlgMem.close();
+    cart.push({ product: memProduct, qty: 1, session: null, member });
+    renderCart();
+  };
+
+  // ---------- tender ----------
+  const dlgTender = $('dlg-tender');
+  let tenders = [];
+  $('tender-cancel').onclick = () => dlgTender.close();
+
+  $('btn-tender').onclick = async () => {
+    const body = {
+      lines: cart.map((l) => ({
+        product_id: l.product.id,
+        qty: l.qty,
+        event_session_id: l.session?.id,
+        member: l.member ? (l.member.member_id
+          ? { member_id: l.member.member_id }
+          : { name: l.member.name, email: l.member.email }) : undefined,
+      })),
+      discount_code: discount ? discount.code : undefined,
+      customer: { name: $('cust-name').value.trim(), email: $('cust-email').value.trim() },
+    };
+    try {
+      currentOrder = (await op.api('/api/pos/orders', { body })).order;
+    } catch { return; }
+    tenders = [];
+    renderTender();
+    dlgTender.showModal();
+  };
+
+  function parseAmt(v) {
+    const n = Math.round(parseFloat(String(v).replace(/[$,]/g, '')) * 100);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+  function tenderSums() {
+    const sum = tenders.reduce((a, t) => a + t.amount_cents, 0);
+    const total = currentOrder.total_cents;
+    return { sum, total, remaining: Math.max(0, total - sum), change: Math.max(0, sum - total) };
+  }
+  function renderTender() {
+    const { sum, total, remaining, change } = tenderSums();
+    $('tender-total').textContent = money(total);
+    $('tender-sum').textContent = money(sum);
+    $('tender-remaining').textContent = money(remaining);
+    $('tender-change').textContent = money(change);
+    $('cash-amt').value = ''; $('card-amt').value = remaining ? (remaining / 100).toFixed(2) : '';
+    $('tender-list').innerHTML = tenders.map((t, i) => `
+      <div><span>${t.method === 'cash' ? 'Cash' : 'Card'} ${money(t.amount_cents)}</span>
+      <button class="op-btn secondary" data-i="${i}" style="padding:1px 10px">remove</button></div>`).join('');
+    for (const b of $('tender-list').querySelectorAll('button')) {
+      b.onclick = () => { tenders.splice(Number(b.dataset.i), 1); renderTender(); };
+    }
+    const cashSum = tenders.filter((t) => t.method === 'cash').reduce((a, t) => a + t.amount_cents, 0);
+    $('tender-finalize').disabled = !(sum >= total && change <= cashSum);
+    $('quick-bills').innerHTML = '';
+    const bills = [remaining, 2000, 5000, 10000].filter((b, i, a) => b > 0 && a.indexOf(b) === i);
+    for (const b of bills) {
+      const btn = document.createElement('button');
+      btn.className = 'op-btn secondary';
+      btn.textContent = b === remaining ? `Exact ${money(b)}` : money(b);
+      btn.onclick = () => { tenders.push({ method: 'cash', amount_cents: b }); renderTender(); };
+      $('quick-bills').appendChild(btn);
+    }
+  }
+  $('add-cash').onclick = () => {
+    const amt = parseAmt($('cash-amt').value);
+    if (!amt) return op.toast('Enter a cash amount', 'err');
+    tenders.push({ method: 'cash', amount_cents: amt }); renderTender();
+  };
+  $('add-card').onclick = () => {
+    const amt = parseAmt($('card-amt').value);
+    if (!amt) return op.toast('Enter a card amount', 'err');
+    tenders.push({ method: 'card_sim', amount_cents: amt }); renderTender();
+  };
+  $('tender-finalize').onclick = async () => {
+    try {
+      const result = await op.api(`/api/pos/orders/${currentOrder.id}/finalize`, { body: { payments: tenders } });
+      dlgTender.close();
+      $('btn-clear').onclick();
+      receiptFrom = 'sell';
+      renderReceipt(result.order, { change_cents: result.change_cents, members: result.members });
+      show('receipt');
+      if (result.change_cents > 0) op.toast('Change due: ' + money(result.change_cents), 'ok');
+    } catch (err) {
+      if (err.code === 'capacity') dlgTender.close();
+      /* toast already shown by op.api */
+    }
+  };
+
+  // ---------- receipt ----------
+  function statusBadge(s) {
+    const kind = s === 'paid' ? 'ok' : s === 'open' ? 'warn' : 'err';
+    return `<span class="op-badge ${kind}">${s}</span>`;
+  }
+  function renderReceipt(order, { change_cents = null, members = [] } = {}) {
+    const change = change_cents !== null ? change_cents
+      : order.payments.reduce((a, p) => a + p.change_cents, 0);
+    const paperTop = `
+      <div class="paper print-block">
+        <h3>OWL PARK <span class="muted">Owl Park</span></h3>
+        <div class="mono">${esc(order.confirmation || '(no confirmation — open order)')}</div>
+        <div class="muted">${new Date(order.paid_at || order.created_at).toLocaleString()}
+          · ${order.channel.toUpperCase()} · ${order.status}</div>
+        ${order.customer_name ? `<div class="muted">${esc(order.customer_name)} ${esc(order.customer_email)}</div>` : ''}
+        <div class="rule"></div>
+        <table>${order.lines.map((l) => `
+          <tr><td>${l.qty} × ${esc(l.description)}
+            ${l.session_starts_at ? `<br><span class="muted">${op.fmtDate(l.session_starts_at)} ${op.fmtTime(l.session_starts_at)}</span>` : ''}
+          </td><td class="num">${money(l.qty * l.unit_price_cents)}</td></tr>
+          ${l.discount_cents ? `<tr><td class="muted">line discount</td><td class="num">−${money(l.discount_cents)}</td></tr>` : ''}`).join('')}
+        </table>
+        <div class="rule"></div>
+        <table>
+          <tr><td>Subtotal</td><td class="num">${money(order.subtotal_cents)}</td></tr>
+          ${order.discount_cents ? `<tr><td>Discount ${esc(order.discount_code || '')}</td><td class="num">−${money(order.discount_cents)}</td></tr>` : ''}
+          <tr><td>Tax</td><td class="num">${money(order.tax_cents)}</td></tr>
+          <tr class="grand"><td class="grand">TOTAL</td><td class="num grand">${money(order.total_cents)}</td></tr>
+        </table>
+        <div class="rule"></div>
+        <table>${order.payments.map((p) => `
+          <tr><td>${p.amount_cents < 0 ? 'REFUND ' : ''}${p.method === 'cash' ? 'Cash' : 'Card'}
+            ${p.ref ? `<span class="muted mono">${esc(p.ref)}</span>` : ''}</td>
+          <td class="num">${money(p.amount_cents)}</td></tr>`).join('')}
+          ${change > 0 ? `<tr><td>Change</td><td class="num">${money(change)}</td></tr>` : ''}
+        </table>
+        <div class="rule"></div>
+        <div class="muted">Thank you for visiting! · ${order.tickets.length} ticket(s)</div>
+      </div>`;
+
+    const stubs = order.tickets.map((tk) => `
+      <div class="paper stub print-block">
+        <h3>${esc(tk.line_description)}</h3>
+        <div class="muted">${esc(order.confirmation || '')}</div>
+        ${tk.session_starts_at
+          ? `<div><strong>${op.fmtDate(tk.session_starts_at)} ${op.fmtTime(tk.session_starts_at)}</strong></div>` : ''}
+        <div class="muted">Valid ${op.fmtDate(tk.valid_from)} – ${op.fmtDate(tk.valid_to)}
+          · ${tk.uses_remaining} use(s)</div>
+        <div>Holder: ${tk.holder_name ? esc(tk.holder_name) : '<span class="holder" style="display:inline-block;width:60%"></span>'}</div>
+        ${tk.status !== 'valid' ? `<div style="color:#c00;font-weight:700">${tk.status.toUpperCase()}</div>` : ''}
+        <div class="code-wrap">${barcode39Svg(tk.code, { height: 56 })}</div>
+      </div>`).join('');
+
+    const passes = (members || []).map((m) => `
+      <div class="paper stub print-block">
+        <h3>Member pass</h3>
+        <div><strong>${esc(m.name)}</strong> · ${esc(m.member_no)}</div>
+        <div class="muted">Expires ${op.fmtDate(m.expires_at)}</div>
+        <div class="code-wrap">${barcode39Svg(m.pass_code, { height: 56 })}</div>
+      </div>`).join('');
+
+    $('receipt').innerHTML = paperTop + stubs + passes;
+
+    // actions
+    const acts = [];
+    acts.push(`<button class="op-btn" id="act-print">Print</button>`);
+    if (receiptFrom === 'orders') acts.push(`<button class="op-btn secondary" id="act-back">Back to orders</button>`);
+    acts.push(`<button class="op-btn secondary" id="act-new">New sale</button>`);
+    if (isManager && order.status === 'open') acts.push(`<button class="op-btn danger" id="act-void">Void order</button>`);
+    if (isManager && order.status === 'paid') acts.push(`<button class="op-btn danger" id="act-refund">Refund order</button>`);
+    $('receipt-actions').innerHTML = acts.join('') + ` ${statusBadge(order.status)}`;
+    $('act-print').onclick = () => window.print();
+    $('act-new').onclick = () => show('sell');
+    if ($('act-back')) $('act-back').onclick = () => { show('orders'); searchOrders(); };
+    if ($('act-void')) $('act-void').onclick = async () => {
+      const r = await op.api(`/api/pos/orders/${order.id}/void`, { body: {} });
+      op.toast('Order voided', 'ok');
+      renderReceipt(r.order, {});
+    };
+    if ($('act-refund')) $('act-refund').onclick = async () => {
+      if (!confirm('Refund this order in full? Tickets will be voided.')) return;
+      const r = await op.api(`/api/pos/orders/${order.id}/refund`, { body: {} });
+      op.toast('Order refunded — ' + r.voided_tickets + ' ticket(s) voided', 'ok');
+      renderReceipt(r.order, {});
+    };
+  }
+
+  // ---------- order search ----------
+  async function searchOrders() {
+    const q = $('order-q').value.trim();
+    const { orders } = await op.api('/api/pos/orders?q=' + encodeURIComponent(q));
+    $('order-rows').innerHTML = orders.length ? orders.map((o) => `
+      <tr data-id="${o.id}" style="cursor:pointer">
+        <td class="mono">${esc(o.confirmation || '—')}</td>
+        <td>${op.fmtDate(o.created_at)} ${op.fmtTime(o.created_at)}</td>
+        <td>${esc(o.customer_name || '')}</td>
+        <td>${o.channel}</td>
+        <td class="num">${money(o.total_cents)}</td>
+        <td>${statusBadge(o.status)}</td>
+      </tr>`).join('') : '<tr><td colspan="6" class="op-muted">No orders found.</td></tr>';
+    for (const tr of $('order-rows').querySelectorAll('tr[data-id]')) {
+      tr.onclick = async () => {
+        const { order } = await op.api('/api/pos/orders/' + tr.dataset.id);
+        receiptFrom = 'orders';
+        renderReceipt(order, {});
+        show('receipt');
+      };
+    }
+  }
+  $('btn-order-search').onclick = searchOrders;
+  $('order-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchOrders(); });
+
+  // ---------- boot ----------
+  await loadProducts();
+  renderCart();
+})();
+</script>
+</body>
+</html>

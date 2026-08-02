@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Order confirmed — Owl Park</title>
+<link rel="stylesheet" href="/store/store.css">
+</head>
+<body>
+<main class="st-main">
+  <div class="st-hero st-noprint" style="padding:26px 28px">
+    <h1 style="font-size:26px">You're all set!</h1>
+    <p id="lede">Your order is confirmed. Keep this page's link, or look it up any time
+      with your order code and email.</p>
+  </div>
+  <div id="error"></div>
+  <div id="order"></div>
+  <p class="st-noprint" id="actions" style="display:none">
+    <button class="st-btn" onclick="window.print()">Print tickets</button>
+    <a class="st-btn secondary" href="/store/">Back to the store</a>
+  </p>
+</main>
+
+<script src="/store/store.js"></script>
+<script src="/lib/barcode.js"></script>
+<script>
+'use strict';
+gs.init('home');
+
+(async () => {
+  const q = new URLSearchParams(location.search);
+  const code = q.get('code') || '';
+  const email = q.get('email') || '';
+  try {
+    const { order } = await gs.api(
+      `/api/store/order?code=${encodeURIComponent(code)}&email=${encodeURIComponent(email)}`
+    );
+    gs.renderOrder(order, document.getElementById('order'));
+    document.getElementById('actions').style.display = '';
+    document.getElementById('lede').textContent =
+      `Order ${order.confirmation} is confirmed — a copy is retrievable any time at ` +
+      `"Find my order" with this code and ${order.customer_email}.`;
+  } catch (err) {
+    document.getElementById('error').innerHTML =
+      `<div class="st-error">We could not find that order. ` +
+      `<a href="/store/order.html">Try the order lookup</a>.</div>`;
+  }
+})();
+</script>
+</body>
+</html>

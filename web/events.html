@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Events — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .events-layout { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  .events-side { flex: 1 1 240px; max-width: 320px; }
+  .events-mainCol { flex: 3 1 560px; min-width: 0; }
+  .event-item {
+    display: flex; justify-content: space-between; gap: 8px; align-items: center;
+    padding: 8px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent;
+  }
+  .event-item:hover { background: var(--panel-2); }
+  .event-item.active { background: var(--panel-2); border-color: var(--accent); }
+  .event-item .op-muted { font-size: 12px; }
+  .gen-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+  .gen-form label.op-field { margin: 0; }
+  .gen-form .full { grid-column: 1 / -1; }
+  .day-row { margin-bottom: 14px; }
+  .day-row h3 { margin: 0 0 6px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .sess {
+    border: 1px solid var(--line); background: var(--panel-2); border-radius: 8px;
+    padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; color: var(--text);
+    text-align: left; line-height: 1.3;
+  }
+  .sess:hover { border-color: var(--accent); }
+  .sess .cnt { display: block; font-variant-numeric: tabular-nums; }
+  .sess.ok .cnt { color: var(--ok); }
+  .sess.warn { border-color: rgba(240,180,41,.6); }
+  .sess.warn .cnt { color: var(--warn); }
+  .sess.full { border-color: rgba(240,86,74,.6); background: rgba(240,86,74,.08); }
+  .sess.full .cnt { color: var(--err); }
+  .range-bar { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin-bottom: 14px; }
+  .range-bar label.op-field { margin: 0; }
+  #modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <h1 style="font-size:22px;margin:6px 0 16px">Events &amp; capacity</h1>
+  <div class="events-layout">
+    <div class="events-side">
+      <section class="op-card">
+        <h2>Events</h2>
+        <div id="event-list" class="op-grid" style="gap:4px"></div>
+      </section>
+      <section class="op-card">
+        <h2>New event</h2>
+        <form id="new-event-form">
+          <label class="op-field"><span>Name</span>
+            <input name="name" required style="width:100%"></label>
+          <label class="op-field"><span>Description</span>
+            <input name="description" style="width:100%"></label>
+          <button class="op-btn" style="width:100%">Create event</button>
+        </form>
+      </section>
+    </div>
+
+    <div class="events-mainCol">
+      <section class="op-card">
+        <h2>Bulk-generate sessions <span id="gen-event-name" class="op-muted"></span></h2>
+        <form id="gen-form" class="gen-form">
+          <label class="op-field"><span>From date</span><input type="date" name="start_date" required></label>
+          <label class="op-field"><span>To date</span><input type="date" name="end_date" required></label>
+          <label class="op-field"><span>First start</span><input type="time" name="start_time" value="10:00" required></label>
+          <label class="op-field"><span>Last start</span><input type="time" name="end_time" value="17:30" required></label>
+          <label class="op-field"><span>Interval (min)</span><input type="number" name="interval_minutes" value="90" min="1" required></label>
+          <label class="op-field"><span>Duration (min)</span><input type="number" name="duration_minutes" min="1" placeholder="= interval"></label>
+          <label class="op-field"><span>Capacity</span><input type="number" name="capacity" value="40" min="1" required></label>
+          <div class="full"><button class="op-btn">Generate sessions</button>
+            <span class="op-muted" style="font-size:12px;margin-left:8px">Existing slots at the same start time are skipped.</span></div>
+        </form>
+      </section>
+
+      <section class="op-card">
+        <h2 id="grid-title">Sessions</h2>
+        <div class="range-bar">
+          <label class="op-field"><span>Show from</span><input type="date" id="range-from"></label>
+          <label class="op-field"><span>to</span><input type="date" id="range-to"></label>
+          <button class="op-btn secondary" id="range-apply">Apply</button>
+        </div>
+        <div id="grid"><p class="op-muted">Pick an event.</p></div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<dialog class="op-modal" id="sess-modal">
+  <h2 style="margin:0 0 6px">Edit session</h2>
+  <p class="op-muted" id="modal-when" style="margin:0 0 14px"></p>
+  <p id="modal-sold" style="margin:0 0 14px"></p>
+  <label class="op-field"><span>Capacity</span>
+    <input type="number" id="modal-capacity" min="1" style="width:120px"></label>
+  <div id="modal-actions">
+    <button class="op-btn danger" id="modal-cancel-session">Cancel session</button>
+    <button class="op-btn secondary" id="modal-close">Close</button>
+    <button class="op-btn" id="modal-save">Save capacity</button>
+  </div>
+</dialog>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  const me = await op.init({ page: '/events.html' });
+  if (!me) return;
+
+  const $ = (id) => document.getElementById(id);
+  let events = [];
+  let currentEvent = null;
+  let sessions = [];
+  let modalSession = null;
+
+  // default range: today .. +13 days
+  const isoDay = (d) => {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+  const today = new Date();
+  $('range-from').value = isoDay(today);
+  $('range-to').value = isoDay(new Date(today.getTime() + 13 * (24 * 3600 * 1000)));
+  const genForm = document.forms['gen-form'];
+  genForm.start_date.value = isoDay(today);
+  genForm.end_date.value = isoDay(new Date(today.getTime() + 13 * (24 * 3600 * 1000)));
+
+  async function loadEvents(keepSelection = true) {
+    events = (await op.api('/api/events')).events;
+    const keep = keepSelection && currentEvent && events.find((e) => e.id === currentEvent.id);
+    currentEvent = keep || events[0] || null;
+    renderEventList();
+    await loadSessions();
+  }
+
+  function renderEventList() {
+    const wrap = $('event-list');
+    if (!events.length) {
+      wrap.innerHTML = '<p class="op-muted">No events yet.</p>';
+      return;
+    }
+    wrap.innerHTML = events
+      .map(
+        (e) => `<div class="event-item ${currentEvent && e.id === currentEvent.id ? 'active' : ''}" data-id="${e.id}">
+          <div><div>${op.esc(e.name)}</div>
+          <div class="op-muted">${e.session_count} session${e.session_count === 1 ? '' : 's'}${e.active ? '' : ' · inactive'}</div></div>
+        </div>`
+      )
+      .join('');
+    for (const el of wrap.querySelectorAll('.event-item')) {
+      el.onclick = async () => {
+        currentEvent = events.find((e) => e.id === Number(el.dataset.id));
+        renderEventList();
+        await loadSessions();
+      };
+    }
+    $('gen-event-name').textContent = currentEvent ? '— ' + currentEvent.name : '';
+    $('grid-title').textContent = currentEvent ? `Sessions — ${currentEvent.name}` : 'Sessions';
+  }
+
+  async function loadSessions() {
+    $('gen-event-name').textContent = currentEvent ? '— ' + currentEvent.name : '';
+    $('grid-title').textContent = currentEvent ? `Sessions — ${currentEvent.name}` : 'Sessions';
+    if (!currentEvent) {
+      $('grid').innerHTML = '<p class="op-muted">Pick an event.</p>';
+      return;
+    }
+    const from = $('range-from').value;
+    const to = $('range-to').value;
+    const qs = new URLSearchParams();
+    if (from) qs.set('from', from);
+    if (to) qs.set('to', to);
+    sessions = (await op.api(`/api/events/${currentEvent.id}/sessions?${qs}`)).sessions;
+    renderGrid();
+  }
+
+  function renderGrid() {
+    const grid = $('grid');
+    if (!sessions.length) {
+      grid.innerHTML = '<p class="op-muted">No sessions in this range. Use the generator above.</p>';
+      return;
+    }
+    const byDay = new Map();
+    for (const s of sessions) {
+      const key = isoDay(new Date(s.starts_at));
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key).push(s);
+    }
+    let html = '';
+    for (const [day, list] of byDay) {
+      html += `<div class="day-row"><h3>${op.esc(op.fmtDate(list[0].starts_at))}</h3><div class="chips">`;
+      for (const s of list) {
+        const fill = s.capacity ? s.sold / s.capacity : 0;
+        const cls = s.sold_out ? 'full' : fill >= 0.7 ? 'warn' : 'ok';
+        html += `<button class="sess ${cls}" data-id="${s.id}">
+          ${op.esc(op.fmtTime(s.starts_at))}
+          <span class="cnt">${s.sold}/${s.capacity}${s.sold_out ? ' · SOLD OUT' : ''}</span>
+        </button>`;
+      }
+      html += '</div></div>';
+    }
+    grid.innerHTML = html;
+    for (const el of grid.querySelectorAll('.sess')) {
+      el.onclick = () => openModal(sessions.find((s) => s.id === Number(el.dataset.id)));
+    }
+  }
+
+  // ----- session modal -----
+  const modal = $('sess-modal');
+  function openModal(s) {
+    modalSession = s;
+    $('modal-when').textContent = `${op.fmtDate(s.starts_at)} · ${op.fmtTime(s.starts_at)}–${op.fmtTime(s.ends_at)}`;
+    $('modal-sold').innerHTML = `Sold <strong>${s.sold}</strong> of <strong>${s.capacity}</strong> (${s.remaining} remaining)`;
+    $('modal-capacity').value = s.capacity;
+    $('modal-cancel-session').style.display =
+      ['manager', 'admin'].includes(me.role) ? '' : 'none';
+    modal.showModal();
+  }
+  $('modal-close').onclick = () => modal.close();
+  $('modal-save').onclick = async () => {
+    const capacity = Number($('modal-capacity').value);
+    try {
+      await op.api(`/api/events/sessions/${modalSession.id}`, { method: 'PUT', body: { capacity } });
+      op.toast('Capacity updated', 'ok');
+      modal.close();
+      await loadSessions();
+    } catch { /* toast shown by op.api */ }
+  };
+  $('modal-cancel-session').onclick = async () => {
+    if (!confirm('Cancel this session? Sold tickets will be voided.')) return;
+    try {
+      const r = await op.api(`/api/events/sessions/${modalSession.id}/cancel`, { method: 'POST', body: {} });
+      op.toast(`Session cancelled (${r.voided_tickets} ticket${r.voided_tickets === 1 ? '' : 's'} voided)`, 'ok');
+      modal.close();
+      await loadEvents();
+    } catch { /* toast shown by op.api */ }
+  };
+
+  // ----- forms -----
+  document.getElementById('new-event-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    try {
+      const { event } = await op.api('/api/events', {
+        body: { name: fd.get('name'), description: fd.get('description') },
+      });
+      e.target.reset();
+      currentEvent = event;
+      op.toast(`Created "${event.name}"`, 'ok');
+      await loadEvents(false);
+      currentEvent = events.find((x) => x.id === event.id) || currentEvent;
+      renderEventList();
+      await loadSessions();
+    } catch { /* toast shown */ }
+  });
+
+  genForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!currentEvent) return op.toast('Pick an event first', 'err');
+    const fd = new FormData(genForm);
+    const body = {
+      start_date: fd.get('start_date'),
+      end_date: fd.get('end_date'),
+      start_time: fd.get('start_time'),
+      end_time: fd.get('end_time'),
+      interval_minutes: Number(fd.get('interval_minutes')),
+      capacity: Number(fd.get('capacity')),
+    };
+    if (fd.get('duration_minutes')) body.duration_minutes = Number(fd.get('duration_minutes'));
+    try {
+      const r = await op.api(`/api/events/${currentEvent.id}/sessions/generate`, { body });
+      op.toast(`Generated ${r.created} session${r.created === 1 ? '' : 's'}${r.skipped ? `, skipped ${r.skipped} existing` : ''}`, 'ok');
+      await loadEvents();
+    } catch { /* toast shown */ }
+  });
+
+  $('range-apply').onclick = () => loadSessions();
+
+  await loadEvents();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cart &amp; checkout — Owl Park</title>
+<link rel="stylesheet" href="/store/store.css">
+</head>
+<body>
+<main class="st-main">
+  <h1>Your cart</h1>
+  <div id="error"></div>
+
+  <div class="st-panel" id="cart-panel">
+    <table class="st-table" id="cart-table">
+      <thead>
+        <tr><th>Item</th><th class="num">Price</th><th>Qty</th><th class="num">Amount</th><th></th></tr>
+      </thead>
+      <tbody id="cart-body"></tbody>
+    </table>
+    <p class="st-muted" id="empty-msg" style="display:none">
+      Your cart is empty. <a href="/store/">Browse tickets</a>.
+    </p>
+  </div>
+
+  <div id="checkout" style="display:none">
+    <div class="st-panel">
+      <h2 style="margin-top:0">Discount code</h2>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <input id="discount-input" placeholder="e.g. SAVE10" style="flex:1;min-width:160px">
+        <button class="st-btn secondary" id="discount-btn">Apply</button>
+      </div>
+      <p id="discount-msg" class="st-muted" style="margin-bottom:0"></p>
+    </div>
+
+    <div class="st-panel">
+      <h2 style="margin-top:0">Your details</h2>
+      <label class="st-field"><span>Full name</span><input id="cust-name" autocomplete="name"></label>
+      <label class="st-field"><span>Email (your tickets are retrievable with it)</span>
+        <input id="cust-email" type="email" autocomplete="email"></label>
+    </div>
+
+    <div class="st-panel">
+      <h2 style="margin-top:0">Payment</h2>
+      <p class="st-note">Simulated payment — no real charge. Any well-formed card number is
+        approved; use <strong>4000 0000 0000 0002</strong> to test a declined card.</p>
+      <label class="st-field"><span>Card number</span>
+        <input id="card-number" inputmode="numeric" placeholder="4242 4242 4242 4242" value="4242 4242 4242 4242"></label>
+      <div class="st-totals">
+        <div><span>Subtotal</span><span id="t-sub">$0.00</span></div>
+        <div id="t-disc-row" style="display:none"><span>Discount <span id="t-disc-code"></span></span><span id="t-disc">$0.00</span></div>
+        <div><span>Tax</span><span class="st-muted">calculated at payment</span></div>
+        <div class="grand"><span>Estimated total</span><span id="t-total">$0.00</span></div>
+      </div>
+      <button class="st-btn big" id="pay-btn" style="margin-top:14px">Pay now</button>
+    </div>
+  </div>
+</main>
+
+<script src="/store/store.js"></script>
+<script>
+'use strict';
+gs.init('cart');
+
+let discount = null; // {code, kind, value}
+
+function estimate() {
+  const items = gs.cartGet();
+  const sub = items.reduce((a, i) => a + i.price_cents * i.qty, 0);
+  let disc = 0;
+  if (discount) {
+    disc = discount.kind === 'percent'
+      ? Math.round((sub * discount.value) / 100)
+      : Math.min(discount.value, sub);
+  }
+  document.getElementById('t-sub').textContent = gs.money(sub);
+  document.getElementById('t-disc-row').style.display = disc ? '' : 'none';
+  document.getElementById('t-disc-code').textContent = discount ? discount.code : '';
+  document.getElementById('t-disc').textContent = '−' + gs.money(disc);
+  document.getElementById('t-total').textContent = gs.money(sub - disc) + ' + tax';
+}
+
+function render() {
+  const items = gs.cartGet();
+  const body = document.getElementById('cart-body');
+  document.getElementById('cart-table').style.display = items.length ? '' : 'none';
+  document.getElementById('empty-msg').style.display = items.length ? 'none' : '';
+  document.getElementById('checkout').style.display = items.length ? '' : 'none';
+  body.innerHTML = items.map((i, idx) => `
+    <tr>
+      <td>${gs.esc(i.name)}${i.session_label ? `<br><small class="st-muted">${gs.esc(i.session_label)}</small>` : ''}</td>
+      <td class="num">${gs.money(i.price_cents)}</td>
+      <td><input type="number" class="st-qty" min="1" max="20" value="${i.qty}" data-qty="${idx}"></td>
+      <td class="num">${gs.money(i.price_cents * i.qty)}</td>
+      <td><button class="st-remove" data-remove="${idx}" title="Remove">✕</button></td>
+    </tr>`).join('');
+  estimate();
+}
+
+document.getElementById('cart-body').addEventListener('change', (e) => {
+  const inp = e.target.closest('[data-qty]');
+  if (!inp) return;
+  const items = gs.cartGet();
+  const qty = Math.max(1, Math.min(20, Number(inp.value) || 1));
+  items[Number(inp.dataset.qty)].qty = qty;
+  gs.cartSave(items);
+  render();
+});
+
+document.getElementById('cart-body').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-remove]');
+  if (!btn) return;
+  const items = gs.cartGet();
+  items.splice(Number(btn.dataset.remove), 1);
+  gs.cartSave(items);
+  render();
+});
+
+document.getElementById('discount-btn').addEventListener('click', async () => {
+  const code = document.getElementById('discount-input').value.trim();
+  const msg = document.getElementById('discount-msg');
+  discount = null;
+  if (!code) { msg.textContent = ''; estimate(); return; }
+  try {
+    const r = await gs.api('/api/store/validate-discount', { body: { code } });
+    discount = r.discount;
+    msg.textContent = `Applied: ${r.discount.name}`;
+    msg.style.color = 'var(--ok)';
+  } catch (err) {
+    msg.textContent = 'That code is not valid.';
+    msg.style.color = 'var(--err)';
+  }
+  estimate();
+});
+
+document.getElementById('pay-btn').addEventListener('click', async () => {
+  const errBox = document.getElementById('error');
+  errBox.innerHTML = '';
+  const btn = document.getElementById('pay-btn');
+  const name = document.getElementById('cust-name').value.trim();
+  const email = document.getElementById('cust-email').value.trim();
+  const cardNumber = document.getElementById('card-number').value.trim();
+  const items = gs.cartGet();
+  if (!items.length) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Processing…';
+  try {
+    const r = await gs.api('/api/store/checkout', {
+      body: {
+        customer: { name, email },
+        lines: items.map((i) => ({
+          product_id: i.product_id, qty: i.qty,
+          event_session_id: i.event_session_id || undefined,
+        })),
+        discount_code: discount ? discount.code : undefined,
+        card: { number: cardNumber },
+      },
+    });
+    gs.cartClear();
+    location.href = `/store/confirmation.html?code=${encodeURIComponent(r.confirmation)}&email=${encodeURIComponent(email)}`;
+  } catch (err) {
+    let msg = gs.esc(err.message);
+    if (err.code === 'payment_declined') {
+      msg = 'Your card was declined. No charge was made — please try another card.';
+    } else if (err.code === 'capacity') {
+      msg = 'Sorry — that showtime just sold out. ' +
+        'Please <a href="/store/">pick another session</a> and try again. Nothing was charged.';
+    }
+    errBox.innerHTML = `<div class="st-error">${msg}</div>`;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Pay now';
+  }
+});
+
+render();
+</script>
+</body>
+</html>

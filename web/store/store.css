@@ -1,0 +1,154 @@
+/* Owl Park — guest storefront. Lighter chrome than the back office,
+   zero external assets, fully offline. */
+:root {
+  --bg: #f4f6fb;
+  --card: #ffffff;
+  --ink: #1c2333;
+  --muted: #5b6577;
+  --line: #dde3ee;
+  --brand: #3b4ed8;
+  --brand-ink: #ffffff;
+  --night: #141a3a;
+  --ok: #1a8f4d;
+  --warn: #b26a00;
+  --err: #c73737;
+  --radius: 12px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  min-height: 100vh;
+}
+a { color: var(--brand); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.st-topbar {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--night); color: #eef1ff;
+  padding: 0 18px; height: 56px; position: sticky; top: 0; z-index: 40;
+}
+.st-topbar .brand { font-weight: 700; letter-spacing: .4px; color: #fff; white-space: nowrap; }
+.st-topbar .brand small { font-weight: 400; color: #aab3e8; margin-left: 6px; }
+.st-topbar nav { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
+.st-topbar nav a { color: #c3caf5; padding: 6px 10px; border-radius: 8px; white-space: nowrap; }
+.st-topbar nav a:hover { color: #fff; background: rgba(255,255,255,.09); text-decoration: none; }
+.st-cart-link {
+  color: #fff; background: var(--brand); border-radius: 999px;
+  padding: 7px 14px; font-weight: 600; white-space: nowrap;
+}
+.st-cart-link:hover { text-decoration: none; filter: brightness(1.1); }
+
+.st-main { max-width: 980px; margin: 0 auto; padding: 24px 16px 80px; }
+
+.st-hero {
+  background: linear-gradient(135deg, var(--night) 0%, #2b3a8f 60%, #3b4ed8 100%);
+  color: #fff; border-radius: var(--radius);
+  padding: 40px 28px; margin-bottom: 26px;
+}
+.st-hero h1 { margin: 0 0 8px; font-size: 32px; }
+.st-hero p { margin: 0; color: #ccd4ff; max-width: 60ch; }
+
+h2.st-section { font-size: 20px; margin: 30px 0 12px; }
+
+.st-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+
+.st-card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 16px; display: flex; flex-direction: column; gap: 6px;
+}
+.st-card h3 { margin: 0; font-size: 16px; }
+.st-card .price { font-size: 20px; font-weight: 700; }
+.st-card .desc { color: var(--muted); font-size: 14px; flex: 1; }
+
+.st-btn {
+  display: inline-block; background: var(--brand); color: var(--brand-ink);
+  border: none; border-radius: 9px; padding: 10px 16px;
+  font: inherit; font-weight: 600; cursor: pointer; text-align: center;
+}
+.st-btn:hover { filter: brightness(1.08); text-decoration: none; }
+.st-btn:disabled { opacity: .45; cursor: not-allowed; }
+.st-btn.secondary { background: #e8ecf8; color: var(--brand); }
+.st-btn.big { font-size: 18px; padding: 13px 22px; width: 100%; }
+
+.st-panel {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 18px; margin-bottom: 16px;
+}
+
+input, select {
+  background: #fff; color: var(--ink); border: 1px solid #c3ccdd; border-radius: 8px;
+  padding: 10px 12px; font: inherit; max-width: 100%;
+}
+input:focus, select:focus { outline: 2px solid var(--brand); outline-offset: 0; }
+label.st-field { display: block; margin-bottom: 12px; }
+label.st-field span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+label.st-field input { width: 100%; }
+
+.st-muted { color: var(--muted); }
+.st-error {
+  background: #fdecec; border: 1px solid #f3b9b9; color: var(--err);
+  border-radius: 8px; padding: 10px 14px; margin: 10px 0;
+}
+.st-note {
+  background: #fff8e8; border: 1px solid #ecd9a0; color: #6b5417;
+  border-radius: 8px; padding: 8px 12px; font-size: 13px;
+}
+
+/* session grid */
+.st-days { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 18px; }
+.st-day {
+  border: 1px solid var(--line); background: var(--card); border-radius: 9px;
+  padding: 8px 12px; cursor: pointer; font: inherit; text-align: center; min-width: 74px;
+}
+.st-day.active { background: var(--brand); color: #fff; border-color: var(--brand); }
+.st-day small { display: block; font-size: 11px; opacity: .8; }
+
+.st-sessions { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.st-session {
+  border: 1px solid var(--line); background: var(--card); border-radius: 10px;
+  padding: 12px; cursor: pointer; font: inherit; text-align: left;
+}
+.st-session:hover:not(:disabled) { border-color: var(--brand); }
+.st-session.active { outline: 2px solid var(--brand); border-color: var(--brand); }
+.st-session .time { font-weight: 700; font-size: 17px; }
+.st-session .left { font-size: 13px; color: var(--ok); }
+.st-session .left.low { color: var(--warn); }
+.st-session:disabled { cursor: not-allowed; background: #eef0f5; color: var(--muted); }
+.st-badge-soldout {
+  display: inline-block; background: #f2d4d4; color: var(--err);
+  border-radius: 6px; font-size: 12px; font-weight: 700; padding: 1px 7px;
+}
+
+/* cart table */
+table.st-table { width: 100%; border-collapse: collapse; }
+.st-table th, .st-table td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); }
+.st-table th { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.st-table td.num, .st-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.st-qty { width: 64px; text-align: center; }
+.st-remove { background: none; border: none; color: var(--err); cursor: pointer; font: inherit; }
+
+.st-totals { max-width: 340px; margin-left: auto; }
+.st-totals div { display: flex; justify-content: space-between; padding: 4px 0; }
+.st-totals .grand { border-top: 2px solid var(--ink); font-weight: 700; font-size: 18px; margin-top: 6px; padding-top: 8px; }
+
+/* tickets */
+.st-ticket {
+  background: #fff; color: #111; border: 2px dashed #98a2b8; border-radius: var(--radius);
+  padding: 22px; margin: 0 0 18px; max-width: 560px;
+}
+.st-ticket h3 { margin: 0 0 2px; font-size: 20px; }
+.st-ticket .venue { color: #4a5468; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; }
+.st-ticket .meta { margin: 10px 0; font-size: 14px; color: #333; }
+.st-ticket .meta div { margin: 2px 0; }
+.st-ticket .bc { margin-top: 12px; color: #000; }
+
+@media print {
+  .st-topbar, .st-noprint { display: none !important; }
+  body { background: #fff; }
+  .st-main { padding: 0; max-width: none; }
+  .st-ticket { page-break-after: always; border-color: #000; max-width: none; margin: 0; }
+  .st-ticket:last-of-type { page-break-after: auto; }
+}

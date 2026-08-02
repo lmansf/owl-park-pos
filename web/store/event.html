@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pick a showtime — Owl Park</title>
+<link rel="stylesheet" href="/store/store.css">
+</head>
+<body>
+<main class="st-main">
+  <p class="st-noprint"><a href="/store/">&larr; All tickets</a></p>
+  <h1 id="ev-name">Loading…</h1>
+  <p class="st-muted" id="ev-desc"></p>
+
+  <div id="error"></div>
+
+  <h2 class="st-section">1 · Pick a day</h2>
+  <div class="st-days" id="days"></div>
+
+  <h2 class="st-section">2 · Pick a showtime</h2>
+  <div class="st-sessions" id="sessions"><p class="st-muted">Pick a day first.</p></div>
+
+  <div class="st-panel" id="buy-panel" style="margin-top:22px; display:none">
+    <h2 class="st-section" style="margin-top:0">3 · Tickets</h2>
+    <div id="buy-rows"></div>
+    <button class="st-btn big" id="add-btn" style="margin-top:8px">Add to cart</button>
+    <p class="st-muted" id="pick-hint" style="margin-bottom:0">Selected: <span id="picked">nothing yet</span></p>
+  </div>
+</main>
+
+<script src="/store/store.js"></script>
+<script>
+'use strict';
+gs.init('home');
+
+const eventId = Number(new URLSearchParams(location.search).get('id'));
+let products = [];      // products sold for this event
+let sessions = [];      // sessions of the selected day
+let selectedSession = null;
+
+function dateStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function showError(msg) {
+  document.getElementById('error').innerHTML = `<div class="st-error">${gs.esc(msg)}</div>`;
+}
+
+async function loadDay(day) {
+  for (const b of document.querySelectorAll('.st-day')) {
+    b.classList.toggle('active', b.dataset.day === day);
+  }
+  selectedSession = null;
+  updatePicked();
+  const box = document.getElementById('sessions');
+  box.innerHTML = '<p class="st-muted">Loading…</p>';
+  try {
+    const r = await gs.api(`/api/events/${eventId}/sessions?from=${day}&to=${day}`);
+    sessions = r.sessions;
+  } catch (err) {
+    box.innerHTML = '';
+    showError('Could not load sessions: ' + err.message);
+    return;
+  }
+  if (!sessions.length) {
+    box.innerHTML = '<p class="st-muted">No showtimes this day.</p>';
+    return;
+  }
+  box.innerHTML = sessions.map((s) => {
+    const time = new Date(s.starts_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    if (s.sold_out) {
+      return `<button class="st-session" disabled>
+        <div class="time">${time}</div>
+        <span class="st-badge-soldout">Sold out</span>
+      </button>`;
+    }
+    const low = s.remaining <= 5;
+    return `<button class="st-session" data-session="${s.id}">
+      <div class="time">${time}</div>
+      <div class="left${low ? ' low' : ''}">${s.remaining} seat${s.remaining === 1 ? '' : 's'} left</div>
+    </button>`;
+  }).join('');
+}
+
+function updatePicked() {
+  const el = document.getElementById('picked');
+  if (!selectedSession) { el.textContent = 'nothing yet'; return; }
+  el.textContent = gs.fmtSession(selectedSession.starts_at) +
+    ` (${selectedSession.remaining} seats left)`;
+}
+
+document.getElementById('days').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-day]');
+  if (b) loadDay(b.dataset.day);
+});
+
+document.getElementById('sessions').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-session]');
+  if (!b) return;
+  selectedSession = sessions.find((s) => s.id === Number(b.dataset.session)) || null;
+  for (const el of document.querySelectorAll('.st-session')) {
+    el.classList.toggle('active', el === b);
+  }
+  updatePicked();
+});
+
+document.getElementById('add-btn').addEventListener('click', () => {
+  if (!selectedSession) { showError('Pick a showtime first.'); return; }
+  document.getElementById('error').innerHTML = '';
+  let added = 0;
+  for (const p of products) {
+    const qty = Number(document.getElementById(`qty-${p.id}`).value) || 0;
+    if (qty > 0) {
+      gs.cartAdd({
+        product_id: p.id, name: p.name, price_cents: p.price_cents, qty,
+        event_session_id: selectedSession.id,
+        session_label: gs.fmtSession(selectedSession.starts_at),
+      });
+      added += qty;
+    }
+  }
+  if (!added) { showError('Set a quantity of at least 1.'); return; }
+  location.href = '/store/cart.html';
+});
+
+(async () => {
+  if (!eventId) { showError('Missing event id.'); return; }
+  let cat;
+  try {
+    cat = await gs.api('/api/store/catalog');
+  } catch (err) { showError(err.message); return; }
+  const ev = cat.events.find((e) => e.id === eventId);
+  if (!ev) { showError('This event is not on sale online.'); return; }
+  document.getElementById('ev-name').textContent = ev.name;
+  document.getElementById('ev-desc').textContent = ev.description || '';
+  document.title = ev.name + ' — Owl Park';
+
+  products = cat.products.filter((p) => p.event_id === eventId);
+  document.getElementById('buy-panel').style.display = '';
+  document.getElementById('buy-rows').innerHTML = products.map((p) => `
+    <label class="st-field" style="display:flex;align-items:center;gap:12px">
+      <input type="number" class="st-qty" id="qty-${p.id}" min="0" max="20" value="0">
+      <span style="flex:1;margin:0">${gs.esc(p.name)}</span>
+      <strong>${gs.money(p.price_cents)}</strong>
+    </label>`).join('');
+
+  // Day strip: distinct upcoming days that actually have sessions (from the catalog
+  // preload), falling back to the next 14 days.
+  const dayset = [...new Set(
+    cat.sessions.filter((s) => s.event_id === eventId)
+      .map((s) => dateStr(new Date(s.starts_at)))
+  )].sort().slice(0, 14);
+  if (!dayset.length) {
+    const today = new Date();
+    for (let i = 0; i < 14; i++) {
+      dayset.push(dateStr(new Date(today.getFullYear(), today.getMonth(), today.getDate() + i)));
+    }
+  }
+  document.getElementById('days').innerHTML = dayset.map((d) => {
+    const dt = new Date(d + 'T12:00:00');
+    return `<button class="st-day" data-day="${d}">
+      ${dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+      <small>${dt.toLocaleDateString(undefined, { weekday: 'short' })}</small>
+    </button>`;
+  }).join('');
+  loadDay(dayset[0]);
+})();
+</script>
+</body>
+</html>

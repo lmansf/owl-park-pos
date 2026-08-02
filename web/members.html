@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Members — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  #results tr { cursor: pointer; }
+  #results tr.selected td { background: rgba(77,163,255,.12); }
+  .kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; font-size: 14px; margin: 0 0 14px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; }
+  #pass-card {
+    background: #fff; color: #0d1218; border-radius: 12px; padding: 18px 22px;
+    max-width: 440px; border: 1px solid #cfd6dd;
+  }
+  #pass-card .venue { font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; color: #5a6672; }
+  #pass-card .holder { font-size: 20px; font-weight: 700; margin: 4px 0 2px; }
+  #pass-card .meta { font-size: 13px; color: #39434d; margin-bottom: 12px; }
+  #pass-card svg { display: block; }
+  .prog-actions button { margin-right: 6px; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  @media print {
+    #detail-card { border: none; padding: 0; }
+    #pass-card { border: 1px solid #000; }
+  }
+</style>
+</head>
+<body>
+<div class="op-main">
+  <div class="op-row">
+    <section class="op-card no-print" style="flex: 1 1 420px" id="search-card">
+      <h2>Members</h2>
+      <input id="q" placeholder="Search name, email, member number, or pass code" style="width:100%">
+      <table class="op-table" style="margin-top:12px">
+        <thead><tr><th>Number</th><th>Name</th><th>Program</th><th>Expires</th><th>Status</th></tr></thead>
+        <tbody id="results"><tr><td colspan="5" class="op-muted">Loading…</td></tr></tbody>
+      </table>
+    </section>
+
+    <section class="op-card" style="flex: 1 1 460px; display:none" id="detail-card">
+      <div class="no-print">
+        <h2>Member detail</h2>
+        <dl class="kv" id="detail-kv"></dl>
+        <form id="edit-form" class="op-row" style="gap:10px; align-items:flex-end">
+          <label class="op-field" style="flex:1"><span>Name</span>
+            <input name="name" required style="width:100%"></label>
+          <label class="op-field" style="flex:1"><span>Email</span>
+            <input name="email" type="email" style="width:100%"></label>
+          <button class="op-btn secondary" style="margin-bottom:10px">Save</button>
+        </form>
+        <div class="toolbar">
+          <button class="op-btn" id="btn-print">Print pass</button>
+          <button class="op-btn danger" id="btn-suspend" style="display:none">Suspend</button>
+          <button class="op-btn ok" id="btn-reinstate" style="display:none">Reinstate</button>
+        </div>
+        <h2 style="margin-top:20px">Pass preview</h2>
+      </div>
+      <div id="pass-card"></div>
+    </section>
+  </div>
+
+  <section class="op-card no-print" id="programs-card" style="display:none">
+    <h2>Membership programs</h2>
+    <p class="op-muted" style="margin-top:-6px">Prices come from the linked catalog product — edit them in Catalog.</p>
+    <table class="op-table">
+      <thead><tr><th>Name</th><th>Duration</th><th>Benefits</th><th>Linked product</th>
+        <th class="num">Price</th><th class="num">Members</th><th></th></tr></thead>
+      <tbody id="prog-rows"></tbody>
+    </table>
+    <form id="prog-form" class="op-row" style="gap:10px; align-items:flex-end; margin-top:14px">
+      <input type="hidden" name="id">
+      <label class="op-field"><span>Name</span><input name="name" required></label>
+      <label class="op-field"><span>Duration (days)</span>
+        <input name="duration_days" type="number" min="1" required style="width:110px"></label>
+      <label class="op-field" style="flex:1"><span>Benefits</span>
+        <input name="benefits" style="width:100%"></label>
+      <button class="op-btn" style="margin-bottom:10px" id="prog-save">Add program</button>
+      <button class="op-btn secondary" type="button" style="margin-bottom:10px; display:none"
+        id="prog-cancel">Cancel</button>
+    </form>
+  </section>
+</div>
+
+<script src="/shell.js"></script>
+<script src="/lib/barcode.js"></script>
+<script>
+(async () => {
+  const me = await op.init({ page: '/members.html' });
+  if (!me) return;
+  const isManager = me.role === 'admin' || me.role === 'manager';
+
+  let venue = 'Owl Park';
+  try { venue = (await op.api('/api/membership/settings')).venue_name; } catch { /* keep default */ }
+
+  const $ = (id) => document.getElementById(id);
+  let current = null; // selected member
+
+  function memberState(m) {
+    if (m.status === 'suspended') return { label: 'Suspended', cls: 'err' };
+    if (Date.parse(m.expires_at) < Date.now()) return { label: 'Expired', cls: 'warn' };
+    return { label: 'Active', cls: 'ok' };
+  }
+
+  // ---- search ------------------------------------------------------------
+  async function search() {
+    const { members } = await op.api('/api/membership/members?q=' + encodeURIComponent($('q').value.trim()));
+    const tbody = $('results');
+    if (!members.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="op-muted">No members found</td></tr>';
+      return;
+    }
+    tbody.innerHTML = members.map((m) => {
+      const st = memberState(m);
+      return `<tr data-id="${m.id}" class="${current && current.id === m.id ? 'selected' : ''}">
+        <td>${op.esc(m.member_no)}</td><td>${op.esc(m.name)}</td>
+        <td>${op.esc(m.program_name)}</td><td>${op.fmtDate(m.expires_at)}</td>
+        <td><span class="op-badge ${st.cls}">${st.label}</span></td></tr>`;
+    }).join('');
+    for (const tr of tbody.querySelectorAll('tr[data-id]')) {
+      tr.onclick = () => loadMember(Number(tr.dataset.id));
+    }
+  }
+  let debounce = null;
+  $('q').addEventListener('input', () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(search, 250);
+  });
+
+  // ---- detail + pass -----------------------------------------------------
+  async function loadMember(id) {
+    const { member } = await op.api('/api/membership/members/' + id);
+    current = member;
+    renderDetail();
+    search();
+  }
+
+  function renderDetail() {
+    const m = current;
+    $('detail-card').style.display = '';
+    const st = memberState(m);
+    $('detail-kv').innerHTML = `
+      <dt>Number</dt><dd>${op.esc(m.member_no)}</dd>
+      <dt>Program</dt><dd>${op.esc(m.program_name)}</dd>
+      <dt>Joined</dt><dd>${op.fmtDate(m.joined_at)}</dd>
+      <dt>Expires</dt><dd>${op.fmtDate(m.expires_at)}</dd>
+      <dt>Status</dt><dd><span class="op-badge ${st.cls}">${st.label}</span></dd>
+      <dt>Pass code</dt><dd>${op.esc(m.pass_code)}</dd>`;
+    const f = $('edit-form');
+    f.name.value = m.name;
+    f.email.value = m.email;
+    $('btn-suspend').style.display = isManager && m.status === 'active' ? '' : 'none';
+    $('btn-reinstate').style.display = isManager && m.status === 'suspended' ? '' : 'none';
+    $('pass-card').innerHTML = `
+      <div class="venue">${op.esc(venue)}</div>
+      <div class="holder">${op.esc(m.name)}</div>
+      <div class="meta">${op.esc(m.member_no)} · ${op.esc(m.program_name)} ·
+        valid through ${op.fmtDate(m.expires_at)}</div>
+      <div id="pass-barcode"></div>`;
+    barcode39(document.getElementById('pass-barcode'), m.pass_code, { height: 60 });
+  }
+
+  $('edit-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const { member } = await op.api('/api/membership/members/' + current.id, {
+      method: 'PUT', body: { name: fd.get('name'), email: fd.get('email') },
+    });
+    current = member;
+    renderDetail();
+    search();
+    op.toast('Member saved', 'ok');
+  });
+
+  $('btn-print').onclick = () => window.print();
+  $('btn-suspend').onclick = async () => {
+    const { member } = await op.api(`/api/membership/members/${current.id}/suspend`, { method: 'POST', body: {} });
+    current = member; renderDetail(); search(); op.toast('Member suspended', 'ok');
+  };
+  $('btn-reinstate').onclick = async () => {
+    const { member } = await op.api(`/api/membership/members/${current.id}/reinstate`, { method: 'POST', body: {} });
+    current = member; renderDetail(); search(); op.toast('Member reinstated', 'ok');
+  };
+
+  // ---- programs (admin/manager) -------------------------------------------
+  async function loadPrograms() {
+    const { programs } = await op.api('/api/membership/programs');
+    $('prog-rows').innerHTML = programs.map((p) => `
+      <tr><td>${op.esc(p.name)}</td><td>${p.duration_days} days</td>
+        <td>${op.esc(p.benefits)}</td>
+        <td>${p.product_name ? op.esc(p.product_name) : '<span class="op-muted">none</span>'}</td>
+        <td class="num">${p.price_cents == null ? '—' : op.money(p.price_cents)}</td>
+        <td class="num">${p.member_count}</td>
+        <td class="prog-actions">
+          <button class="op-btn secondary" data-edit="${p.id}">Edit</button>
+          <button class="op-btn danger" data-del="${p.id}">Delete</button>
+        </td></tr>`).join('');
+    for (const b of $('prog-rows').querySelectorAll('button[data-edit]')) {
+      b.onclick = () => {
+        const p = programs.find((x) => x.id === Number(b.dataset.edit));
+        const f = $('prog-form');
+        f.id.value = p.id; f.name.value = p.name;
+        f.duration_days.value = p.duration_days; f.benefits.value = p.benefits;
+        $('prog-save').textContent = 'Save program';
+        $('prog-cancel').style.display = '';
+      };
+    }
+    for (const b of $('prog-rows').querySelectorAll('button[data-del]')) {
+      b.onclick = async () => {
+        try {
+          await op.api('/api/membership/programs/' + b.dataset.del, { method: 'DELETE' });
+          op.toast('Program deleted', 'ok');
+          loadPrograms();
+        } catch { /* toast shown by op.api */ }
+      };
+    }
+  }
+
+  function resetProgForm() {
+    const f = $('prog-form');
+    f.reset(); f.id.value = '';
+    $('prog-save').textContent = 'Add program';
+    $('prog-cancel').style.display = 'none';
+  }
+  $('prog-cancel').onclick = resetProgForm;
+  $('prog-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const body = {
+      name: fd.get('name'),
+      duration_days: Number(fd.get('duration_days')),
+      benefits: fd.get('benefits'),
+    };
+    const id = fd.get('id');
+    if (id) await op.api('/api/membership/programs/' + id, { method: 'PUT', body });
+    else await op.api('/api/membership/programs', { body });
+    op.toast('Program saved', 'ok');
+    resetProgForm();
+    loadPrograms();
+  });
+
+  if (isManager) {
+    $('programs-card').style.display = '';
+    loadPrograms();
+  }
+
+  // deep link: /members.html#<id> opens that member (used by POS receipts etc.)
+  search();
+  const hashId = Number(location.hash.slice(1));
+  if (hashId) loadMember(hashId).catch(() => {});
+})();
+</script>
+</body>
+</html>

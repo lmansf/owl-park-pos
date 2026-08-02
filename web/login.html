@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .login-wrap { min-height: 100vh; display: grid; place-items: center; }
+  .login-card { width: min(380px, 92vw); }
+  .login-card h1 { font-size: 22px; margin: 0 0 4px; }
+  .login-card .op-muted { margin: 0 0 18px; }
+  .demo { font-size: 12px; margin-top: 14px; }
+</style>
+</head>
+<body>
+<div class="login-wrap">
+  <form class="op-card login-card" id="login-form">
+    <h1>OWL PARK <span class="op-muted">POS</span></h1>
+    <p class="op-muted">Back-office sign in</p>
+    <label class="op-field"><span>Username</span>
+      <input name="username" autocomplete="username" autofocus required style="width:100%">
+    </label>
+    <label class="op-field"><span>Password</span>
+      <input name="password" type="password" autocomplete="current-password" required style="width:100%">
+    </label>
+    <button class="op-btn" style="width:100%">Sign in</button>
+    <p class="demo op-muted">Demo: admin/admin · manager/manager · cashier/cashier · gate/gate</p>
+  </form>
+</div>
+<script src="/shell.js"></script>
+<script>
+  document.getElementById('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    try {
+      const { user } = await op.api('/api/auth/login', {
+        body: { username: fd.get('username'), password: fd.get('password') },
+      });
+      const next = new URLSearchParams(location.search).get('next');
+      location.href = next || (user.role === 'gate' ? '/admissions.html' : '/index.html');
+    } catch { /* toast already shown */ }
+  });
+</script>
+</body>
+</html>

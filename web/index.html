@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .kpi-row {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    margin-bottom: 16px;
+  }
+  .kpi {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 14px 16px;
+  }
+  .kpi .label { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .kpi .value { font-size: 30px; font-weight: 600; line-height: 1.1; }
+  .kpi .sub { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .kpi.hero .value { font-size: 48px; }
+  .meter {
+    position: relative; height: 8px; border-radius: 999px;
+    background: rgba(77, 163, 255, .18); /* lighter step of the accent ramp = track */
+    min-width: 90px; overflow: hidden;
+  }
+  .meter > span { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 999px; }
+  .meter.hot > span { background: var(--warn); }
+  .meter.hot { background: rgba(240, 180, 41, .18); }
+  .fill-cell { display: flex; align-items: center; gap: 10px; }
+  .fill-cell .pct { font-variant-numeric: tabular-nums; min-width: 42px; text-align: right; }
+  .dash-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .dash-head h1 { font-size: 20px; margin: 0; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="dash-head">
+    <h1>Today at a glance</h1>
+    <span class="op-muted" id="as-of"></span>
+  </div>
+
+  <div class="kpi-row" id="kpis"></div>
+
+  <div class="op-card">
+    <h2>Next sessions</h2>
+    <table class="op-table" id="sessions-table">
+      <thead>
+        <tr><th>Event</th><th>Starts</th><th>Ends</th><th class="num">Sold</th>
+            <th class="num">Capacity</th><th>Fill</th></tr>
+      </thead>
+      <tbody><tr><td colspan="6" class="op-muted">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</main>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  const me = await op.init({ page: '/index.html' });
+  if (!me) return;
+
+  function tile(label, value, sub, hero) {
+    return `<div class="kpi${hero ? ' hero' : ''}">
+      <div class="label">${op.esc(label)}</div>
+      <div class="value">${op.esc(value)}</div>
+      ${sub ? `<div class="sub">${op.esc(sub)}</div>` : ''}
+    </div>`;
+  }
+
+  async function refresh() {
+    let d;
+    try { d = await op.api('/api/reports/dashboard'); } catch { return; }
+
+    document.getElementById('as-of').textContent =
+      'as of ' + op.fmtDate(d.as_of) + ' ' + op.fmtTime(d.as_of);
+
+    document.getElementById('kpis').innerHTML = [
+      tile('Revenue today', op.money(d.revenue_cents), 'payments net of change & refunds', true),
+      tile('Orders', String(d.orders_today), 'paid today'),
+      tile('Tickets sold', String(d.tickets_sold_today), 'issued today'),
+      tile('Admits', String(d.admits_ok_today),
+        `in-park estimate · ${d.admits_denied_today} denied`),
+      tile('Active members', String(d.members_active), 'across all programs'),
+    ].join('');
+
+    const tbody = document.querySelector('#sessions-table tbody');
+    if (!d.next_sessions.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="op-muted">No upcoming sessions.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = d.next_sessions.map((s) => `
+      <tr>
+        <td>${op.esc(s.event_name)}</td>
+        <td>${op.esc(op.fmtDate(s.starts_at))} ${op.esc(op.fmtTime(s.starts_at))}</td>
+        <td>${op.esc(op.fmtTime(s.ends_at))}</td>
+        <td class="num">${s.sold}</td>
+        <td class="num">${s.capacity}</td>
+        <td>
+          <div class="fill-cell">
+            <div class="meter${s.fill_pct >= 90 ? ' hot' : ''}" role="img"
+                 aria-label="${s.fill_pct}% full">
+              <span style="width:${Math.min(100, s.fill_pct)}%"></span>
+            </div>
+            <span class="pct">${s.fill_pct}%</span>
+          </div>
+        </td>
+      </tr>`).join('');
+  }
+
+  await refresh();
+  setInterval(refresh, 60_000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admissions — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .adm-layout { display: grid; grid-template-columns: 1fr 340px; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .adm-layout { grid-template-columns: 1fr; } }
+
+  #scan-input {
+    width: 100%; font-size: 26px; padding: 16px 18px; text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .adm-result {
+    border-radius: var(--radius); border: 1px solid var(--line);
+    min-height: 46vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    padding: 24px; gap: 8px; transition: background .15s;
+  }
+  .adm-result.idle { background: var(--panel); color: var(--muted); }
+  .adm-result.ok { background: #0c5c31; border-color: #1f9d5b; }
+  .adm-result.denied { background: #7a1f18; border-color: #c2453b; }
+  .adm-result .verdict { font-size: 64px; font-weight: 800; letter-spacing: 2px; }
+  .adm-result .who { font-size: 30px; font-weight: 600; }
+  .adm-result .why { font-size: 20px; }
+  .adm-result .detail { font-size: 14px; opacity: .85; }
+  .adm-result .code { font-size: 13px; opacity: .7; font-family: ui-monospace, monospace; }
+
+  .adm-count { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .adm-count b { font-size: 40px; font-variant-numeric: tabular-nums; }
+  .adm-count .gatefield { margin-left: auto; font-size: 13px; color: var(--muted); }
+  .adm-count .gatefield input { width: 90px; padding: 4px 8px; font-size: 13px; }
+
+  #recent-list td { font-size: 13px; padding: 6px 8px; }
+  #recent-list .code { font-family: ui-monospace, monospace; font-size: 12px; }
+
+  .sim-list { display: grid; gap: 6px; margin-top: 8px; }
+  .sim-row {
+    display: flex; align-items: center; gap: 8px; background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13px;
+  }
+  .sim-row .meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sim-row button { padding: 4px 10px; font-size: 12px; }
+  .sim-head { display: flex; align-items: center; gap: 10px; }
+  .sim-head h2 { flex: 1; margin: 0; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="adm-layout">
+    <section>
+      <form id="scan-form" class="op-card" autocomplete="off">
+        <input id="scan-input" placeholder="Scan or type a code, then Enter" autofocus
+               autocomplete="off" spellcheck="false">
+      </form>
+      <div id="result" class="adm-result idle">
+        <div class="verdict">READY</div>
+        <div class="why">Waiting for a scan…</div>
+      </div>
+    </section>
+
+    <aside>
+      <div class="op-card adm-count">
+        <b id="today-count">0</b><span class="op-muted">admits today</span>
+        <label class="gatefield">Gate <input id="gate-input" value="main"></label>
+      </div>
+
+      <div class="op-card">
+        <h2>Last 10 scans</h2>
+        <table class="op-table"><tbody id="recent-list">
+          <tr><td class="op-muted">No scans yet.</td></tr>
+        </tbody></table>
+      </div>
+
+      <div class="op-card" id="sim-card" hidden>
+        <div class="sim-head">
+          <h2>Simulator</h2>
+          <button class="op-btn secondary" id="sim-toggle" type="button">Open</button>
+        </div>
+        <div id="sim-body" hidden>
+          <p class="op-muted" style="font-size:12px;margin:8px 0 0">
+            Valid tickets and active members — click to scan.</p>
+          <h3 style="font-size:13px;margin:10px 0 0">Tickets</h3>
+          <div class="sim-list" id="sim-tickets"></div>
+          <h3 style="font-size:13px;margin:12px 0 0">Members</h3>
+          <div class="sim-list" id="sim-members"></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<script src="/shell.js"></script>
+<script>
+(async () => {
+  const me = await op.init({ page: '/admissions.html' });
+  if (!me) return;
+
+  const $ = (id) => document.getElementById(id);
+  const input = $('scan-input');
+  const result = $('result');
+
+  const REASON_TEXT = {
+    unknown: 'Code not recognized',
+    void: 'Ticket voided',
+    expired: 'Expired',
+    not_yet_valid: 'Not valid yet',
+    exhausted: 'Already used — no entries left',
+    wrong_session_time: 'Outside the session entry window',
+    suspended: 'Membership suspended',
+  };
+
+  function reasonText(r) {
+    if (r.reason === 'expired' && r.kind === 'member') {
+      return 'Membership expired — suggest renewal at POS';
+    }
+    return REASON_TEXT[r.reason] || r.reason || '';
+  }
+
+  function showResult(r, code) {
+    const ok = r.result === 'ok';
+    result.className = 'adm-result ' + (ok ? 'ok' : 'denied');
+    result.innerHTML = `
+      <div class="verdict">${ok ? 'OK' : 'DENIED'}</div>
+      <div class="who">${op.esc(r.display_name || (ok ? '' : 'Unknown code'))}</div>
+      ${ok ? '' : `<div class="why">${op.esc(reasonText(r))}</div>`}
+      <div class="detail">${op.esc(r.detail || '')}</div>
+      <div class="code">${op.esc(code)}</div>`;
+  }
+
+  async function loadRecent() {
+    try {
+      const { today_count, recent } = await op.api('/api/admissions/recent');
+      $('today-count').textContent = today_count;
+      const rows = recent.map((a) => `
+        <tr>
+          <td class="op-muted">${op.fmtTime(a.at)}</td>
+          <td>${op.esc(a.display_name || '—')}<br><span class="code op-muted">${op.esc(a.code)}</span></td>
+          <td><span class="op-badge ${a.result === 'ok' ? 'ok' : 'err'}">
+            ${a.result === 'ok' ? 'OK' : op.esc(a.reason || 'denied')}</span></td>
+        </tr>`);
+      $('recent-list').innerHTML =
+        rows.join('') || '<tr><td class="op-muted">No scans yet.</td></tr>';
+    } catch { /* toast already shown */ }
+  }
+
+  async function scan(code) {
+    code = String(code || '').trim();
+    if (!code) return;
+    try {
+      const r = await op.api('/api/admissions/scan', {
+        body: { code, gate: $('gate-input').value.trim() || 'main' },
+      });
+      showResult(r, code.toUpperCase());
+    } catch { /* toast already shown */ }
+    input.value = '';
+    input.focus();
+    loadRecent();
+    if (simVisible && !$('sim-body').hidden) loadSim();
+  }
+
+  $('scan-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    scan(input.value);
+  });
+
+  // --- Simulator (manager/admin only) ---
+  const simVisible = me.role === 'manager' || me.role === 'admin';
+  if (simVisible) {
+    $('sim-card').hidden = false;
+    $('sim-toggle').addEventListener('click', () => {
+      const body = $('sim-body');
+      body.hidden = !body.hidden;
+      $('sim-toggle').textContent = body.hidden ? 'Open' : 'Close';
+      if (!body.hidden) loadSim();
+      input.focus();
+    });
+  }
+
+  async function loadSim() {
+    try {
+      const { tickets, members } = await op.api('/api/admissions/simulator');
+      $('sim-tickets').innerHTML = tickets.map((t) => `
+        <div class="sim-row">
+          <div class="meta">${op.esc(t.holder_name || t.product_name)}
+            <span class="op-muted">· ${op.esc(t.code)}${t.session_starts_at
+              ? ' · ' + op.fmtTime(t.session_starts_at) : ''} · ${t.uses_remaining} left</span></div>
+          <button class="op-btn" data-code="${op.esc(t.code)}" type="button">Scan</button>
+        </div>`).join('') || '<div class="op-muted" style="font-size:12px">No valid tickets.</div>';
+      $('sim-members').innerHTML = members.map((m) => `
+        <div class="sim-row">
+          <div class="meta">${op.esc(m.name)}
+            <span class="op-muted">· ${op.esc(m.program_name)} · ${op.esc(m.pass_code)}</span></div>
+          <button class="op-btn" data-code="${op.esc(m.pass_code)}" type="button">Scan</button>
+        </div>`).join('') || '<div class="op-muted" style="font-size:12px">No active members.</div>';
+    } catch { /* toast already shown */ }
+  }
+
+  $('sim-card').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-code]');
+    if (btn) scan(btn.dataset.code);
+  });
+
+  loadRecent();
+  input.focus();
+})();
+</script>
+</body>
+</html>
