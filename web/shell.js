@@ -8,6 +8,12 @@ window.op = (() => {
     { href: '/catalog.html', label: 'Catalog', roles: ['admin', 'manager'] },
     { href: '/events.html', label: 'Events', roles: ['admin', 'manager'] },
     { href: '/members.html', label: 'Members', roles: ['admin', 'manager', 'cashier'] },
+    { href: '/item-groups.html', label: 'Groups', roles: ['admin', 'manager'] },
+    { href: '/menu-builder.html', label: 'Menus', roles: ['admin', 'manager'] },
+    { href: '/store-builder.html', label: 'Store Builder', roles: ['admin', 'manager'] },
+    { href: '/discounts.html', label: 'Discounts', roles: ['admin', 'manager'] },
+    { href: '/price-programs.html', label: 'Pricing', roles: ['admin', 'manager'] },
+    { href: '/accounts.html', label: 'Accounts', roles: ['admin', 'manager'] },
     { href: '/reports.html', label: 'Reports', roles: ['admin', 'manager'] },
   ];
 
