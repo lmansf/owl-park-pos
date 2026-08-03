@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Discounts — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .disc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .disc-head h2 { margin: 0; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  .form-grid .full { grid-column: 1 / -1; }
+  .checks { display: flex; gap: 16px; padding: 6px 0; }
+  .checks label { display: flex; align-items: center; gap: 6px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+  td .op-btn { padding: 4px 10px; font-size: 13px; font-weight: 500; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="op-card">
+    <div class="disc-head">
+      <h2>Discount codes</h2>
+      <button class="op-btn" id="btn-new-discount">New discount</button>
+    </div>
+    <table class="op-table" id="discount-table">
+      <thead><tr><th>Code</th><th>Name</th><th>Kind</th><th class="num">Value</th><th>Status</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="op-muted" style="font-size:13px">Deactivated codes are rejected at the POS and
+    online store immediately; reactivate to resume redemption.</p>
+  </div>
+</main>
+
+<dialog class="op-modal" id="discount-modal">
+  <h2 id="discount-modal-title">New discount</h2>
+  <form id="discount-form" class="form-grid">
+    <label class="op-field"><span>Code</span><input name="code" required style="width:100%"></label>
+    <label class="op-field"><span>Name</span><input name="name" required style="width:100%"></label>
+    <label class="op-field"><span>Kind</span>
+      <select name="kind" style="width:100%">
+        <option value="percent">percent (%)</option>
+        <option value="amount">amount (USD)</option>
+      </select>
+    </label>
+    <label class="op-field"><span>Value</span><input name="value" type="number" step="0.01" min="0.01" required style="width:100%"></label>
+    <div class="op-field full checks">
+      <label><input type="checkbox" name="active" checked> Active</label>
+    </div>
+    <div class="modal-actions full">
+      <button type="button" class="op-btn secondary" data-close>Cancel</button>
+      <button class="op-btn">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  const me = await op.init({ page: '/discounts.html' });
+  if (!me) return;
+
+  const $ = (sel) => document.querySelector(sel);
+  let discounts = [];
+  let editing = null;
+
+  document.querySelectorAll('[data-close]').forEach((b) => {
+    b.onclick = () => b.closest('dialog').close();
+  });
+
+  function render() {
+    const tb = $('#discount-table tbody');
+    tb.innerHTML = discounts.map((d) => `
+      <tr>
+        <td><code>${op.esc(d.code)}</code></td>
+        <td>${op.esc(d.name)}</td>
+        <td>${op.esc(d.kind)}</td>
+        <td class="num">${d.kind === 'percent' ? d.value + '%' : op.money(d.value)}</td>
+        <td>${d.active ? '<span class="op-badge ok">active</span>' : '<span class="op-badge err">inactive</span>'}</td>
+        <td style="white-space:nowrap" class="op-right">
+          <button class="op-btn secondary" data-edit="${d.id}">Edit</button>
+          <button class="op-btn ${d.active ? 'danger' : 'ok'}" data-toggle="${d.id}">${d.active ? 'Deactivate' : 'Activate'}</button>
+        </td>
+      </tr>`).join('');
+    tb.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => open(Number(b.dataset.edit))));
+    tb.querySelectorAll('[data-toggle]').forEach((b) => (b.onclick = () => toggle(Number(b.dataset.toggle))));
+  }
+
+  async function reload() {
+    discounts = (await op.api('/api/catalog/discounts')).discounts;
+    render();
+  }
+
+  function open(id) {
+    editing = id ? discounts.find((d) => d.id === id) : null;
+    const f = $('#discount-form');
+    $('#discount-modal-title').textContent = editing ? `Edit ${editing.code}` : 'New discount';
+    f.code.value = editing?.code ?? '';
+    f.name.value = editing?.name ?? '';
+    f.kind.value = editing?.kind ?? 'percent';
+    f.value.value = editing
+      ? (editing.kind === 'amount' ? (editing.value / 100).toFixed(2) : editing.value)
+      : '';
+    f.active.checked = editing ? !!editing.active : true;
+    $('#discount-modal').showModal();
+  }
+
+  $('#btn-new-discount').onclick = () => open(null);
+
+  $('#discount-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.currentTarget;
+    const body = {
+      code: f.code.value,
+      name: f.name.value,
+      kind: f.kind.value,
+      value: f.kind.value === 'amount' ? Math.round(Number(f.value.value) * 100) : Number(f.value.value),
+      active: f.active.checked ? 1 : 0,
+    };
+    try {
+      if (editing) await op.api(`/api/catalog/discounts/${editing.id}`, { method: 'PUT', body });
+      else await op.api('/api/catalog/discounts', { body });
+      op.toast('Discount saved', 'ok');
+      $('#discount-modal').close();
+      await reload();
+    } catch { /* toast shown */ }
+  });
+
+  async function toggle(id) {
+    const d = discounts.find((x) => x.id === id);
+    try {
+      await op.api(`/api/catalog/discounts/${id}`, { method: 'PUT', body: { active: d.active ? 0 : 1 } });
+      op.toast(`${d.code} ${d.active ? 'deactivated' : 'activated'}`, 'ok');
+      await reload();
+    } catch { /* toast shown */ }
+  }
+
+  await reload();
+})();
+</script>
+</body>
+</html>

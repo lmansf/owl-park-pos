@@ -26,7 +26,10 @@ node tools/smoke.js   # end-to-end business loop against a scratch DB/server
 ## Design
 
 Spec-driven via OpenSpec: see `openspec/changes/` for each change's proposal, design (module
-boundaries and frozen cross-module contracts), per-system spec deltas, and tasks. The short
+boundaries and frozen cross-module contracts), per-system spec deltas, and tasks —
+`pos-mvp` (the core suite) and `back-office-builders` (standalone editors: item config,
+item groups, POS menu builder, webstore builder, discounts, chart of accounts, price
+programs). The short
 version: every module under `server/modules/` owns its routes and exports a small contract;
 orders are finalized through one shared posting path (`pos.finalizeOrder`), and every gate
 decision goes through one shared validation path (`admissions.checkCode`).

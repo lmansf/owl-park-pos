@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Item Groups — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .grp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .grp-head h2 { margin: 0; }
+  .swatch { display: inline-block; width: 16px; height: 16px; border-radius: 4px; vertical-align: -3px; border: 1px solid rgba(0,0,0,.25); }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+  .table-wrap { overflow-x: auto; }
+  td .op-btn { padding: 4px 10px; font-size: 13px; font-weight: 500; }
+  .checks { display: flex; gap: 16px; padding: 6px 0; }
+  .checks label { display: flex; align-items: center; gap: 6px; }
+  /* two-pane picker */
+  .picker { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: stretch; min-width: 560px; }
+  .pane { border: 1px solid rgba(127,127,127,.35); border-radius: 8px; display: flex; flex-direction: column; min-height: 300px; }
+  .pane h3 { margin: 0; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid rgba(127,127,127,.25); }
+  .pane input[type=search] { margin: 8px 10px 0; padding: 6px 8px; }
+  .pane ul { list-style: none; margin: 8px 0 0; padding: 0; overflow-y: auto; max-height: 320px; flex: 1; }
+  .pane li { padding: 6px 10px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
+  .pane li:hover { background: rgba(127,127,127,.15); }
+  .pane li.sel { background: rgba(90,120,255,.25); }
+  .pane li small { opacity: .7; }
+  .mover { display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+  .picker-count { font-size: 13px; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="op-card">
+    <div class="grp-head">
+      <h2>Item groups</h2>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <label class="checks" style="padding:0"><input type="checkbox" id="show-inactive"> Show inactive</label>
+        <button class="op-btn" id="btn-new-group">New group</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="op-table" id="groups-table">
+        <thead><tr>
+          <th>Name</th><th>Color</th><th class="num">Sort</th><th class="num">Products</th>
+          <th>Status</th><th></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="op-muted" style="font-size:13px">
+      Deleting a group deactivates it — menus and store sections that reference it simply go
+      empty instead of breaking. A product can belong to many groups.
+    </p>
+  </div>
+</main>
+
+<dialog class="op-modal" id="group-modal">
+  <h2 id="group-modal-title">New group</h2>
+  <form id="group-form">
+    <label class="op-field"><span>Name</span><input name="name" required style="width:100%"></label>
+    <label class="op-field"><span>Sort order</span><input name="sort" type="number" step="1" value="0" style="width:100%"></label>
+    <label class="op-field"><span>Color</span><input name="color" type="color" value="#5a78ff"></label>
+    <div class="op-field checks">
+      <label><input type="checkbox" name="active" checked> Active</label>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="op-btn secondary" data-close>Cancel</button>
+      <button class="op-btn">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="op-modal" id="picker-modal" style="max-width:760px">
+  <h2 id="picker-title">Assign products</h2>
+  <div class="picker">
+    <div class="pane">
+      <h3>All products</h3>
+      <input type="search" id="pick-search" placeholder="Filter…">
+      <ul id="pane-avail"></ul>
+    </div>
+    <div class="mover">
+      <button class="op-btn" id="btn-add" title="Add selected">&raquo;</button>
+      <button class="op-btn secondary" id="btn-remove" title="Remove selected">&laquo;</button>
+    </div>
+    <div class="pane">
+      <h3>In group <span class="op-muted picker-count" id="in-count"></span></h3>
+      <ul id="pane-in"></ul>
+    </div>
+  </div>
+  <div class="modal-actions">
+    <button type="button" class="op-btn secondary" data-close>Cancel</button>
+    <button type="button" class="op-btn" id="btn-save-picker">Save assignment</button>
+  </div>
+</dialog>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  const me = await op.init({ page: '/item-groups.html' });
+  if (!me) return;
+
+  const $ = (sel) => document.querySelector(sel);
+  let groups = [];
+  let products = [];
+  let editing = null;      // group being edited in the form modal
+  let pickerGroup = null;  // group whose products are being assigned
+  let inSet = new Set();   // product ids in group (picker working copy)
+  let selAvail = new Set();
+  let selIn = new Set();
+
+  document.querySelectorAll('[data-close]').forEach((b) => {
+    b.onclick = () => b.closest('dialog').close();
+  });
+
+  async function reload() {
+    const all = $('#show-inactive').checked ? '?all=1' : '';
+    [groups, products] = await Promise.all([
+      op.api('/api/groups' + all).then((r) => r.groups),
+      op.api('/api/catalog/products').then((r) => r.products),
+    ]);
+    render();
+  }
+
+  function render() {
+    const tb = $('#groups-table tbody');
+    tb.innerHTML = groups.map((g) => `
+      <tr>
+        <td>${op.esc(g.name)}</td>
+        <td>${g.color ? `<span class="swatch" style="background:${op.esc(g.color)}"></span> <code>${op.esc(g.color)}</code>` : '—'}</td>
+        <td class="num">${g.sort}</td>
+        <td class="num">${g.product_count}</td>
+        <td>${g.active ? '<span class="op-badge ok">active</span>' : '<span class="op-badge err">inactive</span>'}</td>
+        <td style="white-space:nowrap" class="op-right">
+          <button class="op-btn secondary" data-products="${g.id}">Products</button>
+          <button class="op-btn secondary" data-edit="${g.id}">Edit</button>
+          ${g.active
+            ? `<button class="op-btn danger" data-del="${g.id}">Deactivate</button>`
+            : `<button class="op-btn ok" data-undel="${g.id}">Activate</button>`}
+        </td>
+      </tr>`).join('');
+    tb.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openGroup(Number(b.dataset.edit))));
+    tb.querySelectorAll('[data-products]').forEach((b) => (b.onclick = () => openPicker(Number(b.dataset.products))));
+    tb.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => deactivate(Number(b.dataset.del))));
+    tb.querySelectorAll('[data-undel]').forEach((b) => (b.onclick = () => reactivate(Number(b.dataset.undel))));
+  }
+
+  $('#show-inactive').onchange = reload;
+
+  // ---- group form modal ----
+  function openGroup(id) {
+    editing = id ? groups.find((g) => g.id === id) : null;
+    const f = $('#group-form');
+    $('#group-modal-title').textContent = editing ? `Edit ${editing.name}` : 'New group';
+    f.name.value = editing?.name ?? '';
+    f.sort.value = editing?.sort ?? 0;
+    f.color.value = /^#[0-9a-fA-F]{6}$/.test(editing?.color ?? '') ? editing.color : '#5a78ff';
+    f.active.checked = editing ? !!editing.active : true;
+    $('#group-modal').showModal();
+  }
+
+  $('#btn-new-group').onclick = () => openGroup(null);
+
+  $('#group-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.currentTarget;
+    const body = {
+      name: f.name.value,
+      sort: Number(f.sort.value || 0),
+      color: f.color.value,
+      active: f.active.checked ? 1 : 0,
+    };
+    try {
+      if (editing) {
+        await op.api(`/api/groups/${editing.id}`, { method: 'PUT', body });
+        op.toast('Group updated', 'ok');
+      } else {
+        await op.api('/api/groups', { body });
+        op.toast('Group created', 'ok');
+      }
+      $('#group-modal').close();
+      await reload();
+    } catch { /* toast already shown */ }
+  });
+
+  async function deactivate(id) {
+    const g = groups.find((x) => x.id === id);
+    try {
+      await op.api(`/api/groups/${id}`, { method: 'DELETE' });
+      op.toast(`${g.name} deactivated — references degrade to empty`, 'ok');
+      await reload();
+    } catch { /* toast shown */ }
+  }
+
+  async function reactivate(id) {
+    try {
+      await op.api(`/api/groups/${id}`, { method: 'PUT', body: { active: 1 } });
+      op.toast('Group activated', 'ok');
+      await reload();
+    } catch { /* toast shown */ }
+  }
+
+  // ---- two-pane product picker ----
+  async function openPicker(id) {
+    pickerGroup = groups.find((g) => g.id === id);
+    const detail = await op.api(`/api/groups/${id}`);
+    inSet = new Set(detail.product_ids);
+    selAvail = new Set();
+    selIn = new Set();
+    $('#pick-search').value = '';
+    $('#picker-title').textContent = `Assign products — ${pickerGroup.name}`;
+    renderPicker();
+    $('#picker-modal').showModal();
+  }
+
+  function itemHtml(p, selected) {
+    return `<li data-id="${p.id}" class="${selected ? 'sel' : ''}">
+      <span>${op.esc(p.name)} <small>${op.esc(p.sku)}</small></span>
+      <small>${op.money(p.price_cents)}</small>
+    </li>`;
+  }
+
+  function renderPicker() {
+    const q = $('#pick-search').value.trim().toLowerCase();
+    const avail = products.filter((p) => !inSet.has(p.id) &&
+      (!q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q)));
+    const inside = products.filter((p) => inSet.has(p.id));
+    $('#pane-avail').innerHTML = avail.map((p) => itemHtml(p, selAvail.has(p.id))).join('');
+    $('#pane-in').innerHTML = inside.map((p) => itemHtml(p, selIn.has(p.id))).join('');
+    $('#in-count').textContent = `(${inside.length})`;
+    $('#pane-avail').querySelectorAll('li').forEach((li) => (li.onclick = () => {
+      const pid = Number(li.dataset.id);
+      selAvail.has(pid) ? selAvail.delete(pid) : selAvail.add(pid);
+      renderPicker();
+    }));
+    $('#pane-in').querySelectorAll('li').forEach((li) => (li.onclick = () => {
+      const pid = Number(li.dataset.id);
+      selIn.has(pid) ? selIn.delete(pid) : selIn.add(pid);
+      renderPicker();
+    }));
+  }
+
+  $('#pick-search').oninput = renderPicker;
+
+  $('#btn-add').onclick = () => {
+    selAvail.forEach((pid) => inSet.add(pid));
+    selAvail.clear();
+    renderPicker();
+  };
+
+  $('#btn-remove').onclick = () => {
+    selIn.forEach((pid) => inSet.delete(pid));
+    selIn.clear();
+    renderPicker();
+  };
+
+  $('#btn-save-picker').onclick = async () => {
+    try {
+      await op.api(`/api/groups/${pickerGroup.id}/products`, {
+        method: 'PUT',
+        body: { product_ids: [...inSet] },
+      });
+      op.toast(`Saved ${inSet.size} product(s) in ${pickerGroup.name}`, 'ok');
+      $('#picker-modal').close();
+      await reload();
+    } catch { /* toast shown */ }
+  };
+
+  await reload();
+})();
+</script>
+</body>
+</html>

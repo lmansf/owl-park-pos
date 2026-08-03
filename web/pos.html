@@ -25,6 +25,19 @@
   .pos-prod .price { color: var(--accent); font-weight: 700; }
   .pos-prod .name { font-weight: 600; }
 
+  /* designed menu (menu-builder) */
+  .menu-pagebar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .menu-pagebar button {
+    background: var(--panel-2); color: var(--muted); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .menu-pagebar button.active { color: #fff; border-color: var(--accent); background: var(--panel); }
+  .menu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .pos-prod.sm { min-height: 54px; }
+  .pos-prod.lg { min-height: 108px; grid-column: span 2; }
+  @media (max-width: 900px) { .pos-prod.lg { grid-column: span 1; } }
+  .pos-prod.link .price { color: inherit; opacity: .8; }
+
   .pos-cart { position: sticky; top: 68px; }
   .cart-line { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .cart-line .desc { flex: 1; min-width: 0; }
@@ -240,8 +253,28 @@
   $('tab-orders').onclick = () => { show('orders'); searchOrders(); };
 
   // ---------- product grid ----------
+  // When active menu pages exist (menu-builder), render them; otherwise fall
+  // back to the auto-generated grid — selling must never be blocked by menu config.
+  let menuPages = [];
+  let currentPageId = null;
+
   async function loadProducts() {
     products = (await op.api('/api/catalog/sellable?channel=pos')).products;
+    let pages = [];
+    try { pages = (await op.api('/api/menus/active')).pages || []; } catch { pages = []; }
+    const sellable = new Set(products.map((p) => p.id));
+    // keep link buttons; keep product buttons only for products in the pos feed
+    menuPages = pages.map((pg) => ({
+      ...pg,
+      buttons: pg.buttons.filter((b) => b.link_page_id != null || sellable.has(b.product_id)),
+    }));
+    const sellButtons = menuPages.reduce(
+      (a, p) => a + p.buttons.filter((b) => b.product_id != null).length, 0);
+    if (menuPages.length && sellButtons > 0) renderMenu();
+    else renderAutoGrid();
+  }
+
+  function renderAutoGrid() {
     const kinds = [['ticket', 'Tickets'], ['membership', 'Memberships'], ['addon', 'Add-ons']];
     $('product-grid').innerHTML = kinds
       .filter(([k]) => products.some((p) => p.kind === k))
@@ -255,6 +288,43 @@
           </div></div>`).join('');
     for (const btn of document.querySelectorAll('.pos-prod')) {
       btn.onclick = () => tapProduct(products.find((p) => p.id === Number(btn.dataset.id)));
+    }
+  }
+
+  function renderMenu() {
+    const page = menuPages.find((p) => p.id === currentPageId) || menuPages[0];
+    currentPageId = page.id;
+    const bar = menuPages.length > 1 ? `
+      <div class="menu-pagebar">${menuPages.map((p) => `
+        <button class="${p.id === page.id ? 'active' : ''}" data-page="${p.id}">${esc(p.name)}</button>`).join('')}
+      </div>` : '';
+    const cells = page.buttons.map((b) => {
+      const style = b.color ? ` style="background:${esc(b.color)}"` : '';
+      if (b.product_id != null) {
+        const p = products.find((x) => x.id === b.product_id);
+        return `<button class="pos-prod ${b.size}" data-prod="${p.id}"${style}>
+          <span class="name">${esc(b.label || p.name)}</span>
+          <span class="price">${money(p.price_cents)}</span></button>`;
+      }
+      const target = menuPages.find((x) => x.id === b.link_page_id);
+      return `<button class="pos-prod link ${b.size}" data-link="${b.link_page_id}"${style}>
+        <span class="name">${esc(b.label || (target ? target.name : 'Page'))}</span>
+        <span class="price">&rarr;</span></button>`;
+    }).join('');
+    $('product-grid').innerHTML = bar + `<div class="menu-grid">${cells}</div>` +
+      (page.buttons.length ? '' : '<p class="op-muted">This menu page has no buttons.</p>');
+    for (const btn of $('product-grid').querySelectorAll('[data-page]')) {
+      btn.onclick = () => { currentPageId = Number(btn.dataset.page); renderMenu(); };
+    }
+    for (const btn of $('product-grid').querySelectorAll('[data-prod]')) {
+      // identical add-to-cart path as the auto-grid (session picker, member prompt)
+      btn.onclick = () => tapProduct(products.find((p) => p.id === Number(btn.dataset.prod)));
+    }
+    for (const btn of $('product-grid').querySelectorAll('[data-link]')) {
+      btn.onclick = () => {
+        const id = Number(btn.dataset.link);
+        if (menuPages.some((p) => p.id === id)) { currentPageId = id; renderMenu(); }
+      };
     }
   }
 

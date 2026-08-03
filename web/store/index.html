@@ -10,21 +10,27 @@
 <main class="st-main">
   <section class="st-hero">
     <h1 id="venue-name">Owl Park</h1>
-    <p>Hands-on science, a 40-seat planetarium dome, and star-lab workshops.
+    <p id="hero-sub">Hands-on science, a 40-seat planetarium dome, and star-lab workshops.
        Buy day tickets, timed planetarium entry, and annual memberships online —
        print your tickets at home and walk straight to the gate.</p>
   </section>
 
   <div id="error"></div>
 
-  <h2 class="st-section">Day tickets &amp; add-ons</h2>
-  <div class="st-grid" id="tickets"></div>
+  <!-- Curated layout (from the store builder) renders here when sections exist. -->
+  <div id="layout-root" hidden></div>
 
-  <h2 class="st-section">Timed-entry experiences</h2>
-  <div class="st-grid" id="events"></div>
+  <!-- Static fallback: the original landing page, unchanged for fresh installs. -->
+  <div id="static-root">
+    <h2 class="st-section">Day tickets &amp; add-ons</h2>
+    <div class="st-grid" id="tickets"></div>
 
-  <h2 class="st-section">Memberships</h2>
-  <div class="st-grid" id="memberships"></div>
+    <h2 class="st-section">Timed-entry experiences</h2>
+    <div class="st-grid" id="events"></div>
+
+    <h2 class="st-section">Memberships</h2>
+    <div class="st-grid" id="memberships"></div>
+  </div>
 </main>
 
 <script src="/store/store.js"></script>
@@ -33,52 +39,30 @@
 gs.init('home');
 
 (async () => {
-  let cat;
-  try {
-    cat = await gs.api('/api/store/catalog');
-  } catch (err) {
-    document.getElementById('error').innerHTML =
-      `<div class="st-error">Could not load the store: ${gs.esc(err.message)}</div>`;
-    return;
-  }
-  document.getElementById('venue-name').textContent = cat.venue;
-  document.title = cat.venue + ' — Tickets';
+  const byId = new Map(); // product_id -> product, for add-to-cart on both paths
 
-  const plain = cat.products.filter((p) => p.kind !== 'membership' && p.event_id == null);
-  const memberships = cat.products.filter((p) => p.kind === 'membership');
+  const productCard = (p, extra) => {
+    byId.set(p.id, p);
+    // Timed-entry products link to their event's session picker instead of
+    // adding straight to the cart (a session must be chosen first).
+    const action = p.event_id != null
+      ? `<a class="st-btn" href="/store/event.html?id=${p.event_id}">Pick a showtime</a>`
+      : `<button class="st-btn" data-add="${p.id}">Add to cart</button>`;
+    return `
+      <div class="st-card">
+        <h3>${gs.esc(p.name)}</h3>
+        <div class="price">${gs.money(p.price_cents)}</div>
+        <div class="desc">${extra || ''}</div>
+        ${action}
+      </div>`;
+  };
 
-  const card = (p, extra) => `
-    <div class="st-card">
-      <h3>${gs.esc(p.name)}</h3>
-      <div class="price">${gs.money(p.price_cents)}</div>
-      <div class="desc">${extra || ''}</div>
-      <button class="st-btn" data-add="${p.id}">Add to cart</button>
-    </div>`;
+  const defaultDesc = (p) =>
+    p.kind === 'membership' ? 'Annual pass — issued instantly with your order'
+    : p.kind === 'addon' ? 'Add-on'
+    : p.event_id != null ? 'Timed entry — pick a date and showtime.'
+    : `Valid ${p.validity_days} days from purchase`;
 
-  document.getElementById('tickets').innerHTML = plain
-    .map((p) => card(p, p.kind === 'addon' ? 'Add-on' : `Valid ${p.validity_days} days from purchase`))
-    .join('') || '<p class="st-muted">Nothing on sale right now.</p>';
-
-  document.getElementById('memberships').innerHTML = memberships
-    .map((p) => card(p, 'Annual pass — issued instantly with your order'))
-    .join('') || '<p class="st-muted">No membership programs on sale.</p>';
-
-  // Timed-entry: one card per active event, linking to its session picker.
-  document.getElementById('events').innerHTML = cat.events
-    .map((ev) => {
-      const prods = cat.products.filter((p) => p.event_id === ev.id);
-      const from = prods.length ? Math.min(...prods.map((p) => p.price_cents)) : null;
-      return `
-        <div class="st-card">
-          <h3>${gs.esc(ev.name)}</h3>
-          ${from != null ? `<div class="price">from ${gs.money(from)}</div>` : ''}
-          <div class="desc">${gs.esc(ev.description || 'Timed entry — pick a date and showtime.')}</div>
-          <a class="st-btn" href="/store/event.html?id=${ev.id}">Pick a showtime</a>
-        </div>`;
-    })
-    .join('') || '<p class="st-muted">No timed-entry events scheduled.</p>';
-
-  const byId = new Map(cat.products.map((p) => [p.id, p]));
   document.body.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-add]');
     if (!btn) return;
@@ -88,6 +72,93 @@ gs.init('home');
     btn.textContent = 'Added ✓';
     setTimeout(() => { btn.textContent = 'Add to cart'; }, 1200);
   });
+
+  // ---- hero settings (apply whenever set; defaults stay otherwise) ----
+  function applyHero(settings) {
+    if (!settings) return;
+    if (settings.hero_title) {
+      document.getElementById('venue-name').textContent = settings.hero_title;
+      document.title = settings.hero_title + ' — Tickets';
+    }
+    if (settings.hero_sub) {
+      document.getElementById('hero-sub').textContent = settings.hero_sub;
+    }
+    if (/^#([0-9a-fA-F]{3,4}|(?:[0-9a-fA-F]{2}){3,4})$/.test(settings.accent || '')) {
+      document.documentElement.style.setProperty('--brand', settings.accent);
+    }
+  }
+
+  // ---- curated layout ----
+  function renderLayout(sections) {
+    const root = document.getElementById('layout-root');
+    root.innerHTML = sections.map((s) => {
+      if (s.kind === 'html') {
+        // Admin-authored content from the store builder — rendered as written.
+        return `<h2 class="st-section">${gs.esc(s.title)}</h2>
+                <div class="st-panel">${s.html}</div>`;
+      }
+      const cards = (s.products || []).map((p) => productCard(p, defaultDesc(p))).join('');
+      return `<h2 class="st-section">${gs.esc(s.title)}</h2>
+              <div class="st-grid">${cards || '<p class="st-muted">Nothing on sale in this section right now.</p>'}</div>`;
+    }).join('');
+    root.hidden = false;
+    document.getElementById('static-root').hidden = true;
+  }
+
+  // ---- static fallback (original landing page behavior) ----
+  async function renderStatic() {
+    let cat;
+    try {
+      cat = await gs.api('/api/store/catalog');
+    } catch (err) {
+      document.getElementById('error').innerHTML =
+        `<div class="st-error">Could not load the store: ${gs.esc(err.message)}</div>`;
+      return;
+    }
+    if (document.title === 'Owl Park — Tickets') {
+      document.getElementById('venue-name').textContent = cat.venue;
+      document.title = cat.venue + ' — Tickets';
+    }
+
+    const plain = cat.products.filter((p) => p.kind !== 'membership' && p.event_id == null);
+    const memberships = cat.products.filter((p) => p.kind === 'membership');
+
+    document.getElementById('tickets').innerHTML = plain
+      .map((p) => productCard(p, p.kind === 'addon' ? 'Add-on' : `Valid ${p.validity_days} days from purchase`))
+      .join('') || '<p class="st-muted">Nothing on sale right now.</p>';
+
+    document.getElementById('memberships').innerHTML = memberships
+      .map((p) => productCard(p, 'Annual pass — issued instantly with your order'))
+      .join('') || '<p class="st-muted">No membership programs on sale.</p>';
+
+    // Timed-entry: one card per active event, linking to its session picker.
+    document.getElementById('events').innerHTML = cat.events
+      .map((ev) => {
+        const prods = cat.products.filter((p) => p.event_id === ev.id);
+        const from = prods.length ? Math.min(...prods.map((p) => p.price_cents)) : null;
+        return `
+          <div class="st-card">
+            <h3>${gs.esc(ev.name)}</h3>
+            ${from != null ? `<div class="price">from ${gs.money(from)}</div>` : ''}
+            <div class="desc">${gs.esc(ev.description || 'Timed entry — pick a date and showtime.')}</div>
+            <a class="st-btn" href="/store/event.html?id=${ev.id}">Pick a showtime</a>
+          </div>`;
+      })
+      .join('') || '<p class="st-muted">No timed-entry events scheduled.</p>';
+  }
+
+  // ---- boot: curated layout when configured, otherwise the original page ----
+  let layout = null;
+  try {
+    layout = await gs.api('/api/store/layout');
+  } catch { /* layout API unavailable — fall back to the static page */ }
+
+  applyHero(layout && layout.settings);
+  if (layout && Array.isArray(layout.sections) && layout.sections.length) {
+    renderLayout(layout.sections);
+  } else {
+    await renderStatic();
+  }
 })();
 </script>
 </body>

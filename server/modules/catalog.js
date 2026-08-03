@@ -1,6 +1,7 @@
 'use strict';
 const { ApiError } = require('../core/http');
 const { audit } = require('../core/auth');
+const { now } = require('../core/db');
 
 const KINDS = ['ticket', 'membership', 'addon'];
 const CHANNELS = ['pos', 'web'];
@@ -18,9 +19,25 @@ function getSellable(db, channel) {
        ORDER BY p.kind, p.name`
     )
     .all();
+  // Effective pricing: an active price program overrides the base price everywhere —
+  // feed, POS, and store alike, because order pricing reads this same feed.
+  let resolvePrice = null;
+  try { resolvePrice = require('./pricing').resolvePrice; } catch { /* module absent */ }
+  const at = new Date().toISOString();
   return rows
     .filter((r) => String(r.channels).split(',').map((s) => s.trim()).includes(channel))
-    .map(({ channels, ...rest }) => rest);
+    .map(({ channels, ...rest }) => {
+      const override = resolvePrice ? resolvePrice(db, rest.id, at) : null;
+      if (override && override.price_cents !== rest.price_cents) {
+        return {
+          ...rest,
+          price_cents: override.price_cents,
+          base_price_cents: rest.price_cents,
+          program_name: override.program_name,
+        };
+      }
+      return rest;
+    });
 }
 
 // Returns the active discounts row for a code (case-insensitive), or null.
@@ -139,6 +156,38 @@ function mustProduct(db, id) {
   return row;
 }
 
+// --- sibling-module views (item-config page; presence-guarded, read-only) --------
+
+// All item groups with membership flags for one product, via the groups module's
+// frozen exports. Returns null when the module is absent or fails (parallel-build
+// safe): the UI hides the widget instead of erroring.
+function productGroupsView(db, ctx, productId) {
+  const groups = ctx?.modules?.groups;
+  if (typeof groups?.listGroups !== 'function' ||
+      typeof groups?.productIdsInGroup !== 'function') return null;
+  try {
+    return groups.listGroups(db).map((g) => {
+      const ids = groups.productIdsInGroup(db, g.id).map(Number);
+      return { ...g, product_ids: ids, member: ids.includes(productId) ? 1 : 0 };
+    });
+  } catch {
+    return null;
+  }
+}
+
+// Active price-program override for a product right now, via pricing's frozen
+// resolvePrice export. Null = no override OR module absent (UI treats both as
+// "no active override to show").
+function activePriceOverride(db, ctx, productId) {
+  const pricing = ctx?.modules?.pricing;
+  if (typeof pricing?.resolvePrice !== 'function') return null;
+  try {
+    return pricing.resolvePrice(db, productId, now()) || null;
+  } catch {
+    return null;
+  }
+}
+
 // --- mount ------------------------------------------------------------------------
 
 function mount(router, ctx) {
@@ -171,6 +220,17 @@ function mount(router, ctx) {
       )
       .all(),
   }));
+
+  // Single product for the item-config page, enriched at request time with
+  // sibling-module data when those modules are mounted (null otherwise).
+  router.get('/api/catalog/products/:id', ['admin', 'manager'], (req) => {
+    const product = mustProduct(db, req.params.id);
+    return {
+      product,
+      groups: productGroupsView(db, ctx, product.id),
+      price_override: activePriceOverride(db, ctx, product.id),
+    };
+  });
 
   router.post('/api/catalog/products', ['admin', 'manager'], (req) => {
     const p = productPayload(db, req.body, null);

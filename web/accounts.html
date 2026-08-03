@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accounts — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .acc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .acc-head h2 { margin: 0; }
+  .table-wrap { overflow-x: auto; }
+  .map-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .map-grid h3 { margin: 0 0 8px; font-size: 14px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+  .map-grid select { width: 100%; }
+  .journal-bar { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .journal-bar .op-field { margin-bottom: 0; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+  td .op-btn { padding: 4px 10px; font-size: 13px; font-weight: 500; }
+  .totals-row td { font-weight: 700; border-top: 2px solid var(--line); }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="op-card">
+    <div class="acc-head">
+      <h2>Chart of accounts</h2>
+      <button class="op-btn admin-only" id="btn-new-account">New account</button>
+    </div>
+    <div class="table-wrap">
+      <table class="op-table" id="accounts-table">
+        <thead><tr><th>Code</th><th>Name</th><th>Kind</th><th>Status</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="op-muted" style="font-size:13px">Account <code>9999 Unmapped</code> is the suspense account — activity with no mapping posts there so the books always balance. Edits are admin-only.</p>
+  </div>
+
+  <div class="op-card">
+    <div class="acc-head"><h2>Mappings</h2></div>
+    <div class="map-grid" id="map-grid"></div>
+    <p class="op-muted" style="font-size:13px">Leaving a row unmapped sends its activity to 9999 Unmapped.</p>
+  </div>
+
+  <div class="op-card">
+    <div class="acc-head"><h2>Daily journal</h2></div>
+    <div class="journal-bar">
+      <label class="op-field"><span>From</span><input type="date" id="j-from"></label>
+      <label class="op-field"><span>To</span><input type="date" id="j-to"></label>
+      <button class="op-btn" id="btn-run">Run</button>
+      <a class="op-btn secondary" id="btn-csv" href="#" download>Download CSV</a>
+    </div>
+    <div id="journal-out" class="op-muted">Pick a range and press Run.</div>
+  </div>
+</main>
+
+<dialog class="op-modal" id="account-modal">
+  <h2 id="account-modal-title">New account</h2>
+  <form id="account-form">
+    <label class="op-field"><span>Code</span><input name="code" required style="width:100%"></label>
+    <label class="op-field"><span>Name</span><input name="name" required style="width:100%"></label>
+    <label class="op-field"><span>Kind</span>
+      <select name="kind" style="width:100%">
+        <option value="asset">asset</option>
+        <option value="liability">liability</option>
+        <option value="income">income</option>
+        <option value="expense">expense</option>
+        <option value="clearing">clearing</option>
+      </select>
+    </label>
+    <label class="op-field"><span><input type="checkbox" name="active" checked> Active</span></label>
+    <div class="modal-actions">
+      <button type="button" class="op-btn secondary" data-close>Cancel</button>
+      <button class="op-btn">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  const me = await op.init({ page: '/accounts.html' });
+  if (!me) return;
+  const isAdmin = me.role === 'admin';
+  if (!isAdmin) document.querySelectorAll('.admin-only').forEach((el) => el.remove());
+
+  const $ = (sel) => document.querySelector(sel);
+  let accounts = [];
+  let mapData = { mappings: [], targets: { products: [], tax_groups: [], tenders: [], discounts: [] } };
+  let editingAccount = null;
+
+  document.querySelectorAll('[data-close]').forEach((b) => {
+    b.onclick = () => b.closest('dialog').close();
+  });
+
+  // ---- accounts table ----
+  function renderAccounts() {
+    const tb = $('#accounts-table tbody');
+    tb.innerHTML = accounts.map((a) => `
+      <tr>
+        <td><code>${op.esc(a.code)}</code></td>
+        <td>${op.esc(a.name)}</td>
+        <td>${op.esc(a.kind)}</td>
+        <td>${a.active ? '<span class="op-badge ok">active</span>' : '<span class="op-badge err">inactive</span>'}</td>
+        <td class="op-right">${isAdmin ? `<button class="op-btn secondary" data-edit="${a.id}">Edit</button>` : ''}</td>
+      </tr>`).join('');
+    tb.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openAccount(Number(b.dataset.edit))));
+  }
+
+  function openAccount(id) {
+    editingAccount = id ? accounts.find((a) => a.id === id) : null;
+    const f = $('#account-form');
+    $('#account-modal-title').textContent = editingAccount ? `Edit ${editingAccount.code}` : 'New account';
+    f.code.value = editingAccount?.code ?? '';
+    f.name.value = editingAccount?.name ?? '';
+    f.kind.value = editingAccount?.kind ?? 'income';
+    f.active.checked = editingAccount ? !!editingAccount.active : true;
+    $('#account-modal').showModal();
+  }
+
+  const newBtn = $('#btn-new-account');
+  if (newBtn) newBtn.onclick = () => openAccount(null);
+
+  $('#account-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.currentTarget;
+    const body = {
+      code: f.code.value,
+      name: f.name.value,
+      kind: f.kind.value,
+      active: f.active.checked ? 1 : 0,
+    };
+    try {
+      if (editingAccount) await op.api(`/api/accounts/${editingAccount.id}`, { method: 'PUT', body });
+      else await op.api('/api/accounts', { body });
+      op.toast('Account saved', 'ok');
+      $('#account-modal').close();
+      await reloadAll();
+    } catch { /* toast shown */ }
+  });
+
+  // ---- mappings ----
+  function accountOptions(selectedId) {
+    const opts = accounts
+      .map((a) => `<option value="${a.id}" ${a.id === selectedId ? 'selected' : ''}>${op.esc(a.code)} — ${op.esc(a.name)}</option>`)
+      .join('');
+    return `<option value="" ${selectedId ? '' : 'selected'}>— unmapped (9999) —</option>` + opts;
+  }
+
+  function mappedId(scope, refKey) {
+    const m = mapData.mappings.find((x) => x.scope === scope && String(x.ref_key) === String(refKey));
+    return m ? m.account_id : null;
+  }
+
+  function mapGroup(title, scope, rows, labelOf) {
+    const trs = rows.map((r) => {
+      const key = scope === 'tender' ? r : String(r.id);
+      return `
+        <tr>
+          <td>${labelOf(r)}</td>
+          <td><select data-scope="${scope}" data-ref="${op.esc(key)}" ${isAdmin ? '' : 'disabled'}>
+            ${accountOptions(mappedId(scope, key))}
+          </select></td>
+        </tr>`;
+    }).join('');
+    return `<div><h3>${title}</h3><table class="op-table"><tbody>${trs}</tbody></table></div>`;
+  }
+
+  function renderMappings() {
+    const t = mapData.targets;
+    $('#map-grid').innerHTML =
+      mapGroup('Tenders → clearing', 'tender', t.tenders, (m) => op.esc(m)) +
+      mapGroup('Products → income', 'product', t.products,
+        (p) => `<code>${op.esc(p.sku)}</code> ${op.esc(p.name)}${p.active ? '' : ' <span class="op-badge err">inactive</span>'}`) +
+      mapGroup('Tax groups → liability', 'tax_group', t.tax_groups,
+        (g) => `${op.esc(g.name)} (${(g.rate_bp / 100).toFixed(2)}%)`) +
+      mapGroup('Discounts → contra', 'discount', t.discounts,
+        (d) => `<code>${op.esc(d.code)}</code> ${op.esc(d.name)}`);
+    document.querySelectorAll('#map-grid select').forEach((sel) => {
+      sel.onchange = async () => {
+        try {
+          await op.api('/api/accounts/map', {
+            method: 'PUT',
+            body: {
+              scope: sel.dataset.scope,
+              ref_key: sel.dataset.ref,
+              account_id: sel.value ? Number(sel.value) : null,
+            },
+          });
+          op.toast('Mapping saved', 'ok');
+        } catch { /* toast shown */ }
+      };
+    });
+  }
+
+  // ---- journal ----
+  function fmtCell(col, val) {
+    if (col.endsWith('_cents') && typeof val === 'number') return op.money(val);
+    return op.esc(val ?? '');
+  }
+
+  function renderJournal(report) {
+    const out = $('#journal-out');
+    out.classList.remove('op-muted');
+    out.innerHTML = report.sections.map((s) => {
+      if (!s.rows.length) return `<h3>${op.esc(s.title)}</h3><p class="op-muted">No activity in this range.</p>`;
+      const head = s.columns.map((c) => `<th class="${c.endsWith('_cents') ? 'num' : ''}">${op.esc(c.replace(/_cents$/, ''))}</th>`).join('');
+      const body = s.rows.map((r) =>
+        `<tr>${s.columns.map((c) => `<td class="${c.endsWith('_cents') ? 'num' : ''}">${fmtCell(c, r[c])}</td>`).join('')}</tr>`).join('');
+      const totals = s.totals
+        ? `<tr class="totals-row">${s.columns.map((c) => `<td class="${c.endsWith('_cents') ? 'num' : ''}">${fmtCell(c, s.totals[c])}</td>`).join('')}</tr>`
+        : '';
+      return `<h3>${op.esc(s.title)}</h3><div class="table-wrap"><table class="op-table"><thead><tr>${head}</tr></thead><tbody>${body}${totals}</tbody></table></div>`;
+    }).join('');
+    const bad = report.sections.find((s) => s.title === 'Daily totals')?.rows
+      .filter((r) => r.difference_cents !== 0) || [];
+    if (bad.length) op.toast(`Out of balance on ${bad.map((r) => r.date).join(', ')}`, 'err');
+  }
+
+  function rangeQS() {
+    const from = $('#j-from').value;
+    const to = $('#j-to').value;
+    const parts = [];
+    if (from) parts.push('from=' + from);
+    if (to) parts.push('to=' + to);
+    return parts.length ? '?' + parts.join('&') : '';
+  }
+
+  async function runJournal() {
+    try {
+      renderJournal(await op.api('/api/accounts/journal' + rangeQS()));
+      $('#btn-csv').href = '/api/accounts/journal' + rangeQS() + (rangeQS() ? '&' : '?') + 'format=csv';
+    } catch { /* toast shown */ }
+  }
+  $('#btn-run').onclick = runJournal;
+
+  // default range: last 7 days
+  const today = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const dstr = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  $('#j-to').value = dstr(today);
+  $('#j-from').value = dstr(new Date(today.getTime() - 6 * 24 * 3600 * 1000));
+  $('#btn-csv').href = '/api/accounts/journal' + rangeQS() + '&format=csv';
+
+  // ---- data loading ----
+  async function reloadAll() {
+    [accounts, mapData] = await Promise.all([
+      op.api('/api/accounts').then((r) => r.accounts),
+      op.api('/api/accounts/map'),
+    ]);
+    renderAccounts();
+    renderMappings();
+  }
+
+  await reloadAll();
+  await runJournal();
+})();
+</script>
+</body>
+</html>

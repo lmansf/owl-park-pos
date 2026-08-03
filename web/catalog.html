@@ -6,15 +6,13 @@
 <title>Catalog — Owl Park POS</title>
 <link rel="stylesheet" href="/shell.css">
 <style>
-  .cat-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-  .cat-head h2 { margin: 0; }
-  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
-  .form-grid .full { grid-column: 1 / -1; }
-  .checks { display: flex; gap: 16px; padding: 6px 0; }
-  .checks label { display: flex; align-items: center; gap: 6px; }
-  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+  .cat-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .cat-head h2 { margin: 0; margin-right: auto; }
+  .cat-head input[type="search"] { min-width: 220px; }
   .table-wrap { overflow-x: auto; }
+  #products-table tbody tr { cursor: pointer; }
   td .op-btn { padding: 4px 10px; font-size: 13px; font-weight: 500; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
 </style>
 </head>
 <body>
@@ -22,79 +20,46 @@
   <div class="op-card">
     <div class="cat-head">
       <h2>Products</h2>
-      <button class="op-btn" id="btn-new-product">New product</button>
+      <input type="search" id="search" placeholder="Search SKU or name…">
+      <select id="status-filter">
+        <option value="all">All statuses</option>
+        <option value="active">Active only</option>
+        <option value="inactive">Inactive only</option>
+      </select>
+      <select id="kind-filter">
+        <option value="all">All kinds</option>
+        <option value="ticket">ticket</option>
+        <option value="membership">membership</option>
+        <option value="addon">addon</option>
+      </select>
+      <a href="/item-config.html" class="op-btn" style="text-decoration:none">New product</a>
     </div>
     <div class="table-wrap">
       <table class="op-table" id="products-table">
         <thead><tr>
           <th>SKU</th><th>Name</th><th>Kind</th><th class="num">Price</th><th>Tax group</th>
-          <th>Event</th><th>Program</th><th class="num">Valid (days)</th><th class="num">Max uses</th>
           <th>Channels</th><th>Status</th><th></th>
         </tr></thead>
         <tbody></tbody>
       </table>
     </div>
-    <p class="op-muted" style="font-size:13px">Products that have been sold can be deactivated but never deleted — history stays intact.</p>
+    <p class="op-muted" style="font-size:13px">Click a row to open the item editor.
+    Sold products can be deactivated but never deleted — history stays intact.</p>
   </div>
 
-  <div class="op-row">
-    <div class="op-card" style="flex:1; min-width: 320px;">
-      <div class="cat-head">
-        <h2>Tax groups</h2>
-        <button class="op-btn admin-only" id="btn-new-tax">New tax group</button>
-      </div>
-      <table class="op-table" id="tax-table">
-        <thead><tr><th>Name</th><th class="num">Rate</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <p class="op-muted admin-note" style="font-size:13px">Rates are editable by admins only.</p>
+  <div class="op-card" style="max-width:520px">
+    <div class="cat-head">
+      <h2>Tax groups</h2>
+      <button class="op-btn admin-only" id="btn-new-tax">New tax group</button>
     </div>
-
-    <div class="op-card" style="flex:2; min-width: 380px;">
-      <div class="cat-head">
-        <h2>Discount codes</h2>
-        <button class="op-btn" id="btn-new-discount">New discount</button>
-      </div>
-      <table class="op-table" id="discount-table">
-        <thead><tr><th>Code</th><th>Name</th><th>Kind</th><th class="num">Value</th><th>Status</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
+    <table class="op-table" id="tax-table">
+      <thead><tr><th>Name</th><th class="num">Rate</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="op-muted admin-note" style="font-size:13px">Rates are editable by admins only.
+    Discount codes now live on the <a href="/discounts.html">Discounts</a> page.</p>
   </div>
 </main>
-
-<dialog class="op-modal" id="product-modal">
-  <h2 id="product-modal-title">New product</h2>
-  <form id="product-form" class="form-grid">
-    <label class="op-field"><span>SKU</span><input name="sku" required style="width:100%"></label>
-    <label class="op-field"><span>Kind</span>
-      <select name="kind" style="width:100%">
-        <option value="ticket">ticket</option>
-        <option value="membership">membership</option>
-        <option value="addon">addon</option>
-      </select>
-    </label>
-    <label class="op-field full"><span>Name</span><input name="name" required style="width:100%"></label>
-    <label class="op-field"><span>Price (USD)</span><input name="price" type="number" step="0.01" min="0" required style="width:100%"></label>
-    <label class="op-field"><span>Tax group</span><select name="tax_group_id" style="width:100%"></select></label>
-    <label class="op-field"><span>Linked event (timed tickets)</span><select name="event_id" style="width:100%"></select></label>
-    <label class="op-field"><span>Membership program</span><select name="membership_program_id" style="width:100%"></select></label>
-    <label class="op-field"><span>Validity (days from purchase)</span><input name="validity_days" type="number" min="1" value="1" required style="width:100%"></label>
-    <label class="op-field"><span>Max uses</span><input name="max_uses" type="number" min="1" value="1" required style="width:100%"></label>
-    <div class="op-field full">
-      <span class="op-muted" style="font-size:13px">Channels</span>
-      <div class="checks">
-        <label><input type="checkbox" name="ch-pos" checked> POS</label>
-        <label><input type="checkbox" name="ch-web" checked> Online store</label>
-        <label><input type="checkbox" name="active" checked> Active</label>
-      </div>
-    </div>
-    <div class="modal-actions full">
-      <button type="button" class="op-btn secondary" data-close>Cancel</button>
-      <button class="op-btn">Save</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog class="op-modal" id="tax-modal">
   <h2 id="tax-modal-title">New tax group</h2>
@@ -102,28 +67,6 @@
     <label class="op-field"><span>Name</span><input name="name" required style="width:100%"></label>
     <label class="op-field"><span>Rate (%)</span><input name="rate" type="number" step="0.01" min="0" max="100" required style="width:100%"></label>
     <div class="modal-actions">
-      <button type="button" class="op-btn secondary" data-close>Cancel</button>
-      <button class="op-btn">Save</button>
-    </div>
-  </form>
-</dialog>
-
-<dialog class="op-modal" id="discount-modal">
-  <h2 id="discount-modal-title">New discount</h2>
-  <form id="discount-form" class="form-grid">
-    <label class="op-field"><span>Code</span><input name="code" required style="width:100%"></label>
-    <label class="op-field"><span>Name</span><input name="name" required style="width:100%"></label>
-    <label class="op-field"><span>Kind</span>
-      <select name="kind" style="width:100%">
-        <option value="percent">percent (%)</option>
-        <option value="amount">amount (USD)</option>
-      </select>
-    </label>
-    <label class="op-field"><span>Value</span><input name="value" type="number" step="0.01" min="0.01" required style="width:100%"></label>
-    <div class="op-field full checks">
-      <label><input type="checkbox" name="active" checked> Active</label>
-    </div>
-    <div class="modal-actions full">
       <button type="button" class="op-btn secondary" data-close>Cancel</button>
       <button class="op-btn">Save</button>
     </div>
@@ -141,48 +84,72 @@
     document.querySelectorAll('.admin-only').forEach((el) => el.remove());
   }
 
-  let meta = { tax_groups: [], events: [], membership_programs: [] };
+  let taxGroups = [];
   let products = [];
-  let discounts = [];
-  let editingProduct = null;
   let editingTax = null;
-  let editingDiscount = null;
 
   const $ = (sel) => document.querySelector(sel);
-  const byId = (list, id) => list.find((x) => x.id === id);
 
   document.querySelectorAll('[data-close]').forEach((b) => {
     b.onclick = () => b.closest('dialog').close();
   });
 
-  // ---- rendering ----
+  // ---- products list ----
+  function visibleProducts() {
+    const q = $('#search').value.trim().toLowerCase();
+    const status = $('#status-filter').value;
+    const kind = $('#kind-filter').value;
+    return products.filter((p) => {
+      if (status === 'active' && !p.active) return false;
+      if (status === 'inactive' && p.active) return false;
+      if (kind !== 'all' && p.kind !== kind) return false;
+      if (q && !p.sku.toLowerCase().includes(q) && !p.name.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }
+
   function renderProducts() {
+    const rows = visibleProducts();
     const tb = $('#products-table tbody');
-    tb.innerHTML = products.map((p) => `
-      <tr>
+    tb.innerHTML = rows.map((p) => `
+      <tr data-open="${p.id}">
         <td><code>${op.esc(p.sku)}</code></td>
         <td>${op.esc(p.name)}</td>
         <td>${op.esc(p.kind)}</td>
         <td class="num">${op.money(p.price_cents)}</td>
         <td>${op.esc(p.tax_group_name)} (${(p.tax_rate_bp / 100).toFixed(2)}%)</td>
-        <td>${op.esc(byId(meta.events, p.event_id)?.name ?? '—')}</td>
-        <td>${op.esc(byId(meta.membership_programs, p.membership_program_id)?.name ?? '—')}</td>
-        <td class="num">${p.validity_days}</td>
-        <td class="num">${p.max_uses}</td>
         <td>${op.esc(p.channels)}</td>
         <td>${p.active ? '<span class="op-badge ok">active</span>' : '<span class="op-badge err">inactive</span>'}${p.has_sales ? ' <span class="op-badge" title="Appears on past orders">sold</span>' : ''}</td>
-        <td style="white-space:nowrap">
-          <button class="op-btn secondary" data-edit="${p.id}">Edit</button>
+        <td style="white-space:nowrap" class="op-right">
           <button class="op-btn ${p.active ? 'danger' : 'ok'}" data-toggle="${p.id}">${p.active ? 'Deactivate' : 'Activate'}</button>
         </td>
-      </tr>`).join('');
-    tb.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openProduct(Number(b.dataset.edit))));
-    tb.querySelectorAll('[data-toggle]').forEach((b) => (b.onclick = () => toggleProduct(Number(b.dataset.toggle))));
+      </tr>`).join('') ||
+      '<tr><td colspan="8" class="op-muted">No products match.</td></tr>';
+    tb.querySelectorAll('[data-open]').forEach((tr) => {
+      tr.onclick = () => { location.href = `/item-config.html?id=${tr.dataset.open}`; };
+    });
+    tb.querySelectorAll('[data-toggle]').forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); toggleProduct(Number(b.dataset.toggle)); };
+    });
   }
 
+  async function toggleProduct(id) {
+    const p = products.find((x) => x.id === id);
+    try {
+      await op.api(`/api/catalog/products/${id}`, { method: 'PUT', body: { active: p.active ? 0 : 1 } });
+      op.toast(p.active ? `${p.sku} deactivated — kept for history` : `${p.sku} activated`, 'ok');
+      await reloadAll();
+    } catch { /* toast shown */ }
+  }
+
+  ['#search', '#status-filter', '#kind-filter'].forEach((sel) => {
+    $(sel).addEventListener('input', renderProducts);
+  });
+
+  // ---- tax groups (admin edits, manager reads) ----
   function renderTax() {
     const tb = $('#tax-table tbody');
-    tb.innerHTML = meta.tax_groups.map((t) => `
+    tb.innerHTML = taxGroups.map((t) => `
       <tr>
         <td>${op.esc(t.name)}</td>
         <td class="num">${(t.rate_bp / 100).toFixed(2)}%</td>
@@ -191,110 +158,8 @@
     tb.querySelectorAll('[data-edit-tax]').forEach((b) => (b.onclick = () => openTax(Number(b.dataset.editTax))));
   }
 
-  function renderDiscounts() {
-    const tb = $('#discount-table tbody');
-    tb.innerHTML = discounts.map((d) => `
-      <tr>
-        <td><code>${op.esc(d.code)}</code></td>
-        <td>${op.esc(d.name)}</td>
-        <td>${op.esc(d.kind)}</td>
-        <td class="num">${d.kind === 'percent' ? d.value + '%' : op.money(d.value)}</td>
-        <td>${d.active ? '<span class="op-badge ok">active</span>' : '<span class="op-badge err">inactive</span>'}</td>
-        <td style="white-space:nowrap" class="op-right">
-          <button class="op-btn secondary" data-edit-disc="${d.id}">Edit</button>
-          <button class="op-btn ${d.active ? 'danger' : 'ok'}" data-toggle-disc="${d.id}">${d.active ? 'Deactivate' : 'Activate'}</button>
-        </td>
-      </tr>`).join('');
-    tb.querySelectorAll('[data-edit-disc]').forEach((b) => (b.onclick = () => openDiscount(Number(b.dataset.editDisc))));
-    tb.querySelectorAll('[data-toggle-disc]').forEach((b) => (b.onclick = () => toggleDiscount(Number(b.dataset.toggleDisc))));
-  }
-
-  // ---- data loading ----
-  async function reloadAll() {
-    [meta, products, discounts] = await Promise.all([
-      op.api('/api/catalog/meta'),
-      op.api('/api/catalog/products').then((r) => r.products),
-      op.api('/api/catalog/discounts').then((r) => r.discounts),
-    ]);
-    renderProducts();
-    renderTax();
-    renderDiscounts();
-  }
-
-  // ---- product modal ----
-  function fillSelect(sel, rows, emptyLabel) {
-    sel.innerHTML =
-      (emptyLabel !== undefined ? `<option value="">${emptyLabel}</option>` : '') +
-      rows.map((r) => `<option value="${r.id}">${op.esc(r.name)}</option>`).join('');
-  }
-
-  function openProduct(id) {
-    editingProduct = id ? byId(products, id) : null;
-    const f = $('#product-form');
-    $('#product-modal-title').textContent = editingProduct ? `Edit ${editingProduct.sku}` : 'New product';
-    fillSelect(f.tax_group_id, meta.tax_groups);
-    fillSelect(f.event_id, meta.events, '— none —');
-    fillSelect(f.membership_program_id, meta.membership_programs, '— none —');
-    f.sku.value = editingProduct?.sku ?? '';
-    f.name.value = editingProduct?.name ?? '';
-    f.kind.value = editingProduct?.kind ?? 'ticket';
-    f.price.value = editingProduct ? (editingProduct.price_cents / 100).toFixed(2) : '';
-    f.tax_group_id.value = editingProduct?.tax_group_id ?? meta.tax_groups[0]?.id ?? '';
-    f.event_id.value = editingProduct?.event_id ?? '';
-    f.membership_program_id.value = editingProduct?.membership_program_id ?? '';
-    f.validity_days.value = editingProduct?.validity_days ?? 1;
-    f.max_uses.value = editingProduct?.max_uses ?? 1;
-    const chans = (editingProduct?.channels ?? 'pos,web').split(',');
-    f['ch-pos'].checked = chans.includes('pos');
-    f['ch-web'].checked = chans.includes('web');
-    f.active.checked = editingProduct ? !!editingProduct.active : true;
-    $('#product-modal').showModal();
-  }
-
-  $('#btn-new-product').onclick = () => openProduct(null);
-
-  $('#product-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const f = e.currentTarget;
-    const channels = [f['ch-pos'].checked && 'pos', f['ch-web'].checked && 'web'].filter(Boolean);
-    const body = {
-      sku: f.sku.value,
-      name: f.name.value,
-      kind: f.kind.value,
-      price_cents: Math.round(Number(f.price.value) * 100),
-      tax_group_id: Number(f.tax_group_id.value),
-      event_id: f.event_id.value ? Number(f.event_id.value) : null,
-      membership_program_id: f.membership_program_id.value ? Number(f.membership_program_id.value) : null,
-      validity_days: Number(f.validity_days.value),
-      max_uses: Number(f.max_uses.value),
-      channels,
-      active: f.active.checked ? 1 : 0,
-    };
-    try {
-      if (editingProduct) {
-        await op.api(`/api/catalog/products/${editingProduct.id}`, { method: 'PUT', body });
-        op.toast('Product updated', 'ok');
-      } else {
-        await op.api('/api/catalog/products', { body });
-        op.toast('Product created', 'ok');
-      }
-      $('#product-modal').close();
-      await reloadAll();
-    } catch { /* toast already shown */ }
-  });
-
-  async function toggleProduct(id) {
-    const p = byId(products, id);
-    try {
-      await op.api(`/api/catalog/products/${id}`, { method: 'PUT', body: { active: p.active ? 0 : 1 } });
-      op.toast(p.active ? `${p.sku} deactivated — kept for history` : `${p.sku} activated`, 'ok');
-      await reloadAll();
-    } catch { /* toast shown */ }
-  }
-
-  // ---- tax modal (admin only) ----
   function openTax(id) {
-    editingTax = id ? byId(meta.tax_groups, id) : null;
+    editingTax = id ? taxGroups.find((t) => t.id === id) : null;
     const f = $('#tax-form');
     $('#tax-modal-title').textContent = editingTax ? `Edit ${editingTax.name}` : 'New tax group';
     f.name.value = editingTax?.name ?? '';
@@ -318,49 +183,14 @@
     } catch { /* toast shown */ }
   });
 
-  // ---- discount modal ----
-  function openDiscount(id) {
-    editingDiscount = id ? byId(discounts, id) : null;
-    const f = $('#discount-form');
-    $('#discount-modal-title').textContent = editingDiscount ? `Edit ${editingDiscount.code}` : 'New discount';
-    f.code.value = editingDiscount?.code ?? '';
-    f.name.value = editingDiscount?.name ?? '';
-    f.kind.value = editingDiscount?.kind ?? 'percent';
-    f.value.value = editingDiscount
-      ? (editingDiscount.kind === 'amount' ? (editingDiscount.value / 100).toFixed(2) : editingDiscount.value)
-      : '';
-    f.active.checked = editingDiscount ? !!editingDiscount.active : true;
-    $('#discount-modal').showModal();
-  }
-
-  $('#btn-new-discount').onclick = () => openDiscount(null);
-
-  $('#discount-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const f = e.currentTarget;
-    const body = {
-      code: f.code.value,
-      name: f.name.value,
-      kind: f.kind.value,
-      value: f.kind.value === 'amount' ? Math.round(Number(f.value.value) * 100) : Number(f.value.value),
-      active: f.active.checked ? 1 : 0,
-    };
-    try {
-      if (editingDiscount) await op.api(`/api/catalog/discounts/${editingDiscount.id}`, { method: 'PUT', body });
-      else await op.api('/api/catalog/discounts', { body });
-      op.toast('Discount saved', 'ok');
-      $('#discount-modal').close();
-      await reloadAll();
-    } catch { /* toast shown */ }
-  });
-
-  async function toggleDiscount(id) {
-    const d = byId(discounts, id);
-    try {
-      await op.api(`/api/catalog/discounts/${id}`, { method: 'PUT', body: { active: d.active ? 0 : 1 } });
-      op.toast(`${d.code} ${d.active ? 'deactivated' : 'activated'}`, 'ok');
-      await reloadAll();
-    } catch { /* toast shown */ }
+  // ---- data loading ----
+  async function reloadAll() {
+    [taxGroups, products] = await Promise.all([
+      op.api('/api/catalog/tax-groups').then((r) => r.tax_groups),
+      op.api('/api/catalog/products').then((r) => r.products),
+    ]);
+    renderProducts();
+    renderTax();
   }
 
   await reloadAll();

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Item — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .ic-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .ic-head h2 { margin: 0; }
+  .ic-layout { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  .ic-main { flex: 2; min-width: 380px; }
+  .ic-side { flex: 1; min-width: 300px; display: flex; flex-direction: column; gap: 16px; }
+  .ic-side .op-card { margin-bottom: 0; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  .form-grid .full { grid-column: 1 / -1; }
+  .checks { display: flex; gap: 16px; padding: 6px 0; flex-wrap: wrap; }
+  .checks label { display: flex; align-items: center; gap: 6px; }
+  .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+  .group-list { display: flex; flex-direction: column; gap: 6px; }
+  .group-list label { display: flex; align-items: center; gap: 8px; }
+  .group-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); flex: none; }
+  .override-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .prog-table td { padding: 6px 8px; }
+  .acct-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .acct-row select { flex: 1; min-width: 160px; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="ic-head">
+    <h2 id="ic-title">Item</h2>
+    <a href="/catalog.html" class="op-btn secondary" style="text-decoration:none">Back to catalog</a>
+  </div>
+
+  <div class="ic-layout">
+    <div class="op-card ic-main">
+      <h2 id="ic-form-title">Item details</h2>
+      <form id="item-form" class="form-grid">
+        <label class="op-field"><span>SKU</span><input name="sku" required style="width:100%"></label>
+        <label class="op-field"><span>Kind</span>
+          <select name="kind" style="width:100%">
+            <option value="ticket">ticket</option>
+            <option value="membership">membership</option>
+            <option value="addon">addon</option>
+          </select>
+        </label>
+        <label class="op-field full"><span>Name</span><input name="name" required style="width:100%"></label>
+        <label class="op-field"><span>Price (USD)</span><input name="price" type="number" step="0.01" min="0" required style="width:100%"></label>
+        <label class="op-field"><span>Tax group</span><select name="tax_group_id" style="width:100%"></select></label>
+        <label class="op-field"><span>Linked event (timed tickets)</span><select name="event_id" style="width:100%"></select></label>
+        <label class="op-field"><span>Membership program</span><select name="membership_program_id" style="width:100%"></select></label>
+        <label class="op-field"><span>Validity (days from purchase)</span><input name="validity_days" type="number" min="1" value="1" required style="width:100%"></label>
+        <label class="op-field"><span>Max uses</span><input name="max_uses" type="number" min="1" value="1" required style="width:100%"></label>
+        <div class="op-field full">
+          <span class="op-muted" style="font-size:13px">Channels</span>
+          <div class="checks">
+            <label><input type="checkbox" name="ch-pos" checked> POS</label>
+            <label><input type="checkbox" name="ch-web" checked> Online store</label>
+            <label><input type="checkbox" name="active" checked> Active</label>
+          </div>
+        </div>
+        <div class="form-actions full">
+          <a href="/catalog.html" class="op-btn secondary" style="text-decoration:none">Cancel</a>
+          <button class="op-btn">Save &amp; return to catalog</button>
+        </div>
+      </form>
+      <p class="op-muted" id="ic-sold-note" style="font-size:13px; display:none">This item appears on past orders — it can be deactivated but never deleted.</p>
+    </div>
+
+    <div class="ic-side">
+      <div class="op-card" id="new-hint" style="display:none">
+        <p class="op-muted" style="margin:0">Save the item first — groups, price programs, and
+        account mapping become available once it exists.</p>
+      </div>
+
+      <div class="op-card" id="groups-card" style="display:none">
+        <h2>Item groups</h2>
+        <div class="group-list" id="group-list"></div>
+        <p class="op-muted" style="font-size:13px; margin-bottom:0">Changes apply immediately.</p>
+      </div>
+
+      <div class="op-card" id="pricing-card" style="display:none">
+        <h2>Price programs</h2>
+        <div class="override-line" id="override-line"></div>
+        <div id="prog-list"></div>
+        <p class="op-muted" style="font-size:13px; margin-bottom:0">Overrides are managed on the Pricing page.</p>
+      </div>
+
+      <div class="op-card" id="accounts-card" style="display:none">
+        <h2>Income account</h2>
+        <div class="acct-row">
+          <select id="acct-select"></select>
+          <button class="op-btn secondary" id="acct-save" type="button">Save mapping</button>
+        </div>
+        <p class="op-muted" id="acct-current" style="font-size:13px; margin-bottom:0"></p>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  // item-config is reached from the catalog list; keep the Catalog nav item active
+  // (same admin/manager audience — shell's role gate covers us via that entry).
+  const me = await op.init({ page: '/catalog.html' });
+  if (!me) return;
+
+  const $ = (sel) => document.querySelector(sel);
+  const idParam = new URLSearchParams(location.search).get('id');
+  const itemId = idParam ? Number(idParam) : null;
+
+  // Silent presence probe for sibling-team endpoints (built in parallel):
+  // null = endpoint absent/unhappy → the widget simply doesn't render. No toasts.
+  async function probe(path) {
+    try {
+      const res = await fetch(path);
+      if (!res.ok) return null;
+      return await res.json();
+    } catch { return null; }
+  }
+
+  const meta = await op.api('/api/catalog/meta');
+  let cfg = null; // { product, groups|null, price_override|null } in edit mode
+
+  const f = $('#item-form');
+  function fillSelect(sel, rows, emptyLabel) {
+    sel.innerHTML =
+      (emptyLabel !== undefined ? `<option value="">${emptyLabel}</option>` : '') +
+      rows.map((r) => `<option value="${r.id}">${op.esc(r.name)}</option>`).join('');
+  }
+  fillSelect(f.tax_group_id, meta.tax_groups);
+  fillSelect(f.event_id, meta.events, '— none —');
+  fillSelect(f.membership_program_id, meta.membership_programs, '— none —');
+
+  if (itemId) {
+    try {
+      cfg = await op.api(`/api/catalog/products/${itemId}`);
+    } catch {
+      location.href = '/catalog.html';
+      return;
+    }
+    const p = cfg.product;
+    $('#ic-title').textContent = `Item — ${p.sku}`;
+    $('#ic-form-title').textContent = `Edit ${p.name}`;
+    document.title = `${p.sku} — Owl Park POS`;
+    f.sku.value = p.sku;
+    f.name.value = p.name;
+    f.kind.value = p.kind;
+    f.price.value = (p.price_cents / 100).toFixed(2);
+    f.tax_group_id.value = p.tax_group_id;
+    f.event_id.value = p.event_id ?? '';
+    f.membership_program_id.value = p.membership_program_id ?? '';
+    f.validity_days.value = p.validity_days;
+    f.max_uses.value = p.max_uses;
+    const chans = String(p.channels).split(',');
+    f['ch-pos'].checked = chans.includes('pos');
+    f['ch-web'].checked = chans.includes('web');
+    f.active.checked = !!p.active;
+    if (p.has_sales) $('#ic-sold-note').style.display = '';
+  } else {
+    $('#ic-title').textContent = 'New item';
+    $('#ic-form-title').textContent = 'New item';
+    f.tax_group_id.value = meta.tax_groups[0]?.id ?? '';
+    $('#new-hint').style.display = '';
+  }
+
+  // ---- save ----
+  f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const channels = [f['ch-pos'].checked && 'pos', f['ch-web'].checked && 'web'].filter(Boolean);
+    const body = {
+      sku: f.sku.value,
+      name: f.name.value,
+      kind: f.kind.value,
+      price_cents: Math.round(Number(f.price.value) * 100),
+      tax_group_id: Number(f.tax_group_id.value),
+      event_id: f.event_id.value ? Number(f.event_id.value) : null,
+      membership_program_id: f.membership_program_id.value ? Number(f.membership_program_id.value) : null,
+      validity_days: Number(f.validity_days.value),
+      max_uses: Number(f.max_uses.value),
+      channels,
+      active: f.active.checked ? 1 : 0,
+    };
+    try {
+      if (itemId) {
+        await op.api(`/api/catalog/products/${itemId}`, { method: 'PUT', body });
+      } else {
+        await op.api('/api/catalog/products', { body });
+      }
+      location.href = '/catalog.html';
+    } catch { /* toast already shown */ }
+  });
+
+  if (!itemId) return; // sibling widgets need an existing item
+
+  // ---- item groups widget (groups module; render only when its API answers) ----
+  (async () => {
+    const answered = await probe('/api/groups');
+    if (!answered || !Array.isArray(cfg.groups)) return;
+    const wrap = $('#group-list');
+    const groups = cfg.groups.filter((g) => g.active || g.member);
+    if (!groups.length) {
+      wrap.innerHTML = '<span class="op-muted">No groups defined yet.</span>';
+    } else {
+      wrap.innerHTML = groups.map((g) => `
+        <label>
+          <input type="checkbox" data-gid="${g.id}" ${g.member ? 'checked' : ''}>
+          <span class="group-dot" style="${g.color ? `background:${op.esc(g.color)}` : ''}"></span>
+          ${op.esc(g.name)}
+        </label>`).join('');
+      wrap.querySelectorAll('[data-gid]').forEach((box) => {
+        box.onchange = async () => {
+          const g = groups.find((x) => x.id === Number(box.dataset.gid));
+          const ids = new Set(g.product_ids);
+          if (box.checked) ids.add(itemId); else ids.delete(itemId);
+          try {
+            await op.api(`/api/groups/${g.id}/products`, {
+              method: 'PUT', body: { product_ids: [...ids] },
+            });
+            g.product_ids = [...ids];
+            g.member = box.checked ? 1 : 0;
+            op.toast(box.checked ? `Added to ${g.name}` : `Removed from ${g.name}`, 'ok');
+          } catch {
+            box.checked = !box.checked; // revert; toast already shown
+          }
+        };
+      });
+    }
+    $('#groups-card').style.display = '';
+  })();
+
+  // ---- price programs widget (pricing module; read-only) ----
+  (async () => {
+    const progs = await probe('/api/pricing/programs');
+    if (progs === null && !cfg.price_override) return;
+    const line = $('#override-line');
+    if (cfg.price_override) {
+      line.innerHTML = `<span class="op-badge warn">active override</span>
+        <strong>${op.money(cfg.price_override.price_cents)}</strong>
+        <span class="op-muted">via ${op.esc(cfg.price_override.program_name ?? 'program ' + cfg.price_override.program_id)}</span>`;
+    } else {
+      line.innerHTML = '<span class="op-muted">No active program override — base price applies.</span>';
+    }
+    // Programs that mention this product. The list route only carries entry
+    // counts, so pull each program's entries from the detail route (silently;
+    // shape tolerant — the pricing team owns the exact formats).
+    const list = (progs?.programs ?? (Array.isArray(progs) ? progs : [])).slice(0, 50);
+    const detailed = await Promise.all(list.map(async (p) => {
+      let entries = p.entries ?? p.products;
+      if (!Array.isArray(entries)) {
+        entries = p.entry_count === 0 ? []
+          : (await probe(`/api/pricing/programs/${p.id}`))?.entries ?? [];
+      }
+      return { p, e: entries.find((x) => Number(x.product_id ?? x.id) === itemId) };
+    }));
+    const mine = detailed.filter((x) => x.e);
+    if (mine.length) {
+      $('#prog-list').innerHTML = `
+        <table class="op-table prog-table"><tbody>
+          ${mine.map(({ p, e }) => `<tr>
+              <td>${op.esc(p.name)}</td>
+              <td class="op-muted">${op.esc(p.starts_on ?? '')} → ${op.esc(p.ends_on ?? '')}</td>
+              <td class="num">${e.price_cents != null ? op.money(e.price_cents) : ''}</td>
+              <td>${p.active ? '<span class="op-badge ok">active</span>' : '<span class="op-badge">off</span>'}</td>
+            </tr>`).join('')}
+        </tbody></table>`;
+    }
+    $('#pricing-card').style.display = '';
+  })();
+
+  // ---- income account widget (accounts module) ----
+  (async () => {
+    const [accData, mapData] = await Promise.all([
+      probe('/api/accounts'),
+      probe('/api/accounts/map'),
+    ]);
+    if (accData === null || mapData === null) return;
+    const accounts = accData.accounts ?? (Array.isArray(accData) ? accData : []);
+    const mappings = mapData.map ?? mapData.mappings ?? mapData.account_map ??
+      (Array.isArray(mapData) ? mapData : []);
+    if (!Array.isArray(accounts) || !Array.isArray(mappings)) return;
+
+    const income = accounts.filter((a) => a.kind === 'income' && a.active !== 0);
+    const options = income.length ? income : accounts;
+    const current = mappings.find(
+      (m) => m.scope === 'product' && String(m.ref_key) === String(itemId)
+    );
+    const sel = $('#acct-select');
+    sel.innerHTML = '<option value="">— unmapped —</option>' + options.map((a) =>
+      `<option value="${a.id}">${op.esc(a.code)} ${op.esc(a.name)}</option>`).join('');
+    if (current) sel.value = String(current.account_id);
+    // The accounts API accepts mapping writes from admins only — show managers
+    // the mapping read-only instead of a button that can only 403.
+    if (me.role !== 'admin') {
+      sel.disabled = true;
+      $('#acct-save').style.display = 'none';
+    }
+    const showCurrent = () => {
+      const a = accounts.find((x) => x.id === Number(sel.value));
+      $('#acct-current').textContent = (a
+        ? `Income posts to ${a.code} ${a.name}.`
+        : 'No mapping — income falls back to the default account.') +
+        (me.role !== 'admin' ? ' Changing the mapping is admin-only.' : '');
+    };
+    showCurrent();
+
+    $('#acct-save').onclick = async () => {
+      const body = {
+        scope: 'product',
+        ref_key: String(itemId),
+        account_id: sel.value ? Number(sel.value) : null,
+      };
+      // The accounts team owns the write route shape; try upsert-style PUT,
+      // fall back to POST for create-style APIs. Raw fetch keeps the fallback
+      // attempt from toasting a spurious error.
+      const send = (method) => fetch('/api/accounts/map', {
+        method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+      try {
+        let res = await send('PUT');
+        if (res.status === 404 || res.status === 405) res = await send('POST');
+        const data = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(data?.message || `Request failed (${res.status})`);
+        op.toast('Account mapping saved', 'ok');
+        showCurrent();
+      } catch (err) {
+        op.toast(err.message || 'Could not save mapping', 'err');
+      }
+    };
+    $('#accounts-card').style.display = '';
+  })();
+})();
+</script>
+</body>
+</html>

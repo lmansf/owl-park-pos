@@ -170,6 +170,62 @@ async function main() {
   const csv = await fetch(base + `/api/reports/sales?from=${d}&to=${d}&format=csv`, { headers: { cookie: jars.manager } });
   ok(csv.status === 200 && (csv.headers.get('content-type') || '').includes('text/csv'), 'sales CSV downloads');
 
+  console.log('— builders: groups, menu, storefront —');
+  const admin = as('admin');
+  ok((await admin('POST', '/api/auth/login', { username: 'admin', password: 'admin' })).status === 200, 'admin login');
+  const grp = (await admin('POST', '/api/groups', { name: 'Day Tickets' })).data.group;
+  await admin('PUT', `/api/groups/${grp.id}/products`, { product_ids: [adult.id] });
+  const groups = (await admin('GET', '/api/groups')).data.groups;
+  ok(groups.find((g) => g.id === grp.id)?.product_count === 1, 'group created with product assigned');
+
+  const page = (await admin('POST', '/api/menus/pages', { name: 'Front', sort: 1 })).data.page;
+  await admin('POST', `/api/menus/pages/${page.id}/buttons`, { product_id: adult.id, position: 1, label: 'Adult' });
+  const activeMenu = (await cashier('GET', '/api/menus/active')).data;
+  ok(activeMenu.pages.length === 1 && activeMenu.pages[0].buttons[0].product?.name === adult.name,
+    'designed menu serves product button to POS');
+
+  await admin('PUT', '/api/storefront/settings', { hero_title: 'Welcome to Owl Park' });
+  await admin('POST', '/api/storefront/sections', { title: 'Day Tickets', kind: 'groups', config: { group_id: grp.id } });
+  const layout = (await anon('GET', '/api/store/layout')).data;
+  ok(layout.settings.hero_title === 'Welcome to Owl Park', 'store hero configured');
+  const laySec = layout.sections.find((s) => s.title === 'Day Tickets');
+  ok(laySec && laySec.products.some((p) => p.id === adult.id), 'group section resolves products for guests');
+
+  console.log('— price program overrides everywhere —');
+  const prog = (await admin('POST', '/api/pricing/programs', { name: 'Smoke Sale', starts_on: d, ends_on: d, priority: 10 })).data.program;
+  await admin('PUT', `/api/pricing/programs/${prog.id}/entries`, { entries: [{ product_id: adult.id, price_cents: 2495 }] });
+  const adultNow = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products.find((p) => p.id === adult.id);
+  ok(adultNow.price_cents === 2495 && adultNow.base_price_cents === adult.price_cents
+    && adultNow.program_name === 'Smoke Sale', 'feed shows effective price with base + program');
+  const progOrder = (await cashier('POST', '/api/pos/orders', { lines: [{ product_id: adult.id, qty: 1 }] })).data.order;
+  ok(progOrder.subtotal_cents === 2495, 'POS order charges the program price');
+  await cashier('POST', `/api/pos/orders/${progOrder.id}/finalize`, { payments: [{ method: 'card_sim', amount_cents: progOrder.total_cents }] });
+  const progWeb = await anon('POST', '/api/store/checkout', {
+    customer: { name: 'Sale Shopper', email: 'sale@example.com' },
+    lines: [{ product_id: adult.id, qty: 1 }],
+    card: { number: '4242 4242 4242 4242' },
+  });
+  ok(progWeb.data.order.subtotal_cents === 2495, 'web checkout charges the program price');
+  await admin('DELETE', `/api/pricing/programs/${prog.id}`, {});
+  const adultBack = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products.find((p) => p.id === adult.id);
+  ok(adultBack.price_cents === adult.price_cents && adultBack.base_price_cents === undefined,
+    'removing the program restores the base price');
+
+  console.log('— GL journal balances —');
+  const journal = (await manager('GET', `/api/accounts/journal?from=${d}&to=${d}`)).data;
+  const jrows = journal.sections.find((s) => s.title === 'Journal').rows;
+  ok(jrows.length > 0, 'journal has entries for the smoke day');
+  const byDay = new Map();
+  for (const r of jrows) {
+    const t = byDay.get(r.date) || { dr: 0, cr: 0 };
+    t.dr += r.debit_cents; t.cr += r.credit_cents;
+    byDay.set(r.date, t);
+  }
+  for (const [day, t] of byDay) {
+    assert.equal(t.dr, t.cr, `journal balances on ${day}`);
+  }
+  passed++; console.log('  ✔ journal debits equal credits every day');
+
   console.log(`\nSMOKE PASSED — ${passed} checks green.`);
   server.close();
 }

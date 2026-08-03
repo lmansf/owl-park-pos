@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Menu Builder — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .mb-layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 980px) { .mb-layout { grid-template-columns: 1fr; } }
+  .mb-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .mb-head h2 { margin: 0; }
+  .page-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; cursor: pointer; }
+  .page-row.selected { border-color: var(--accent); }
+  .page-row .nm { flex: 1; min-width: 0; font-weight: 600; }
+  .page-row .nm small { display: block; color: var(--muted); font-weight: 400; }
+  .gen-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
+  .gen-row select { max-width: 220px; }
+  td .op-btn { padding: 3px 9px; font-size: 13px; font-weight: 500; }
+  .swatch { display: inline-block; width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--line); vertical-align: -3px; }
+  .table-wrap { overflow-x: auto; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  .form-grid .full { grid-column: 1 / -1; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+  .checks { display: flex; gap: 16px; padding: 6px 0; }
+  .checks label { display: flex; align-items: center; gap: 6px; }
+  /* live preview mirrors the POS grid */
+  .prev-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 10px; }
+  .prev-btn { min-height: 62px; background: var(--panel); border: 1px solid var(--line); color: var(--text);
+    border-radius: var(--radius); padding: 8px 10px; font: inherit; display: flex; flex-direction: column;
+    justify-content: space-between; text-align: left; }
+  .prev-btn .price { color: var(--accent); font-weight: 700; }
+  .prev-btn.sm { min-height: 44px; }
+  .prev-btn.lg { min-height: 88px; grid-column: span 2; }
+  .prev-btn.off { opacity: .35; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="mb-layout">
+    <div class="op-card">
+      <div class="mb-head">
+        <h2>Menu pages</h2>
+        <button class="op-btn" id="btn-new-page">New page</button>
+      </div>
+      <div id="page-list"></div>
+      <p class="op-muted" style="font-size:13px">POS shows active pages in sort order. With no active pages, the terminal falls back to the automatic product grid.</p>
+    </div>
+
+    <div class="op-card" id="buttons-card">
+      <div class="mb-head">
+        <h2 id="btns-title">Buttons</h2>
+        <div style="display:flex; gap:8px">
+          <button class="op-btn secondary" id="btn-edit-page" hidden>Page settings</button>
+          <button class="op-btn danger" id="btn-del-page" hidden>Delete page</button>
+          <button class="op-btn" id="btn-new-button" hidden>Add button</button>
+        </div>
+      </div>
+      <div class="gen-row" id="gen-row" hidden>
+        <span class="op-muted">Generate:</span>
+        <select id="gen-group" hidden></select>
+        <button class="op-btn secondary" id="btn-gen-group" hidden>From group</button>
+        <button class="op-btn secondary" id="btn-gen-catalog">Fill from catalog</button>
+      </div>
+      <div class="table-wrap">
+        <table class="op-table" id="btn-table" hidden>
+          <thead><tr>
+            <th class="num">Pos</th><th>Type</th><th>Label</th><th>Target</th>
+            <th>Size</th><th>Color</th><th>Status</th><th></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="op-muted" id="no-page-hint">Select a page on the left, or create one.</p>
+      <div class="prev-grid" id="preview"></div>
+    </div>
+  </div>
+</main>
+
+<dialog class="op-modal" id="page-modal">
+  <h2 id="page-modal-title">New page</h2>
+  <form id="page-form">
+    <label class="op-field"><span>Name</span><input name="name" required style="width:100%"></label>
+    <label class="op-field"><span>Sort</span><input name="sort" type="number" value="0" style="width:100%"></label>
+    <div class="checks"><label><input type="checkbox" name="active" checked> Active</label></div>
+    <div class="modal-actions">
+      <button type="button" class="op-btn secondary" data-close>Cancel</button>
+      <button class="op-btn">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="op-modal" id="button-modal">
+  <h2 id="button-modal-title">New button</h2>
+  <form id="button-form" class="form-grid">
+    <label class="op-field"><span>Type</span>
+      <select name="type" style="width:100%">
+        <option value="product">Product button</option>
+        <option value="link">Page link</option>
+      </select>
+    </label>
+    <label class="op-field"><span>Position</span><input name="position" type="number" min="1" style="width:100%" placeholder="auto"></label>
+    <label class="op-field full" id="fld-product"><span>Product</span><select name="product_id" style="width:100%"></select></label>
+    <label class="op-field full" id="fld-link" hidden><span>Links to page</span><select name="link_page_id" style="width:100%"></select></label>
+    <label class="op-field full"><span>Label override (blank = product/page name)</span><input name="label" style="width:100%"></label>
+    <label class="op-field"><span>Color (blank = default)</span><input name="color" style="width:100%" placeholder="#2b6cb0"></label>
+    <label class="op-field"><span>Size</span>
+      <select name="size" style="width:100%">
+        <option value="sm">sm</option><option value="md" selected>md</option><option value="lg">lg</option>
+      </select>
+    </label>
+    <div class="checks full"><label><input type="checkbox" name="active" checked> Active</label></div>
+    <div class="modal-actions full">
+      <button type="button" class="op-btn secondary" data-close>Cancel</button>
+      <button class="op-btn">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  const me = await op.init({ page: '/menu-builder.html' });
+  if (!me) return;
+  const $ = (sel) => document.querySelector(sel);
+  const esc = op.esc, money = op.money;
+
+  let pages = [];            // builder view: all pages + buttons
+  let products = [];         // full back-office product list
+  let groups = null;         // null = groups module unavailable
+  let selectedId = null;
+  let editingPage = null;    // page being edited in the page modal (null = new)
+  let editingButton = null;  // button being edited (null = new)
+
+  document.querySelectorAll('[data-close]').forEach((b) => {
+    b.onclick = () => b.closest('dialog').close();
+  });
+
+  const selected = () => pages.find((p) => p.id === selectedId) || null;
+
+  async function reload() {
+    pages = (await op.api('/api/menus/pages')).pages;
+    if (selectedId && !selected()) selectedId = null;
+    if (!selectedId && pages.length) selectedId = pages[0].id;
+    render();
+  }
+
+  // ---- pages panel ----
+  function render() {
+    $('#page-list').innerHTML = pages.length ? pages.map((p) => `
+      <div class="page-row ${p.id === selectedId ? 'selected' : ''}" data-id="${p.id}">
+        <div class="nm">${esc(p.name)}<small>sort ${p.sort} · ${p.buttons.length} button(s)</small></div>
+        ${p.active ? '<span class="op-badge ok">active</span>' : '<span class="op-badge err">inactive</span>'}
+      </div>`).join('') : '<p class="op-muted">No pages yet.</p>';
+    document.querySelectorAll('.page-row').forEach((el) => {
+      el.onclick = () => { selectedId = Number(el.dataset.id); render(); };
+    });
+    renderButtons();
+  }
+
+  // ---- buttons panel ----
+  function targetOf(b) {
+    if (b.product_id != null) {
+      const dead = b.product_active === 0 ? ' <span class="op-badge err">inactive product</span>' : '';
+      return `${esc(b.product_name ?? '#' + b.product_id)} · ${money(b.product_price_cents ?? 0)}${dead}`;
+    }
+    const dead = b.link_page_active === 0 ? ' <span class="op-badge err">inactive page</span>' : '';
+    return `&rarr; ${esc(b.link_page_name ?? '#' + b.link_page_id)}${dead}`;
+  }
+
+  function renderButtons() {
+    const page = selected();
+    $('#no-page-hint').hidden = !!page;
+    $('#btn-table').hidden = !page;
+    $('#gen-row').hidden = !page;
+    for (const id of ['btn-edit-page', 'btn-del-page', 'btn-new-button']) {
+      document.getElementById(id).hidden = !page;
+    }
+    $('#preview').innerHTML = '';
+    if (!page) { $('#btns-title').textContent = 'Buttons'; return; }
+    $('#btns-title').textContent = `Buttons — ${page.name}`;
+
+    const tb = $('#btn-table tbody');
+    tb.innerHTML = page.buttons.length ? page.buttons.map((b, i) => `
+      <tr>
+        <td class="num">${b.position}</td>
+        <td>${b.product_id != null ? 'product' : 'link'}</td>
+        <td>${esc(b.label) || '<span class="op-muted">(auto)</span>'}</td>
+        <td>${targetOf(b)}</td>
+        <td>${b.size}</td>
+        <td>${b.color ? `<span class="swatch" style="background:${esc(b.color)}"></span> ${esc(b.color)}` : '—'}</td>
+        <td>${b.active ? '<span class="op-badge ok">on</span>' : '<span class="op-badge err">off</span>'}</td>
+        <td style="white-space:nowrap" class="op-right">
+          <button class="op-btn secondary" data-up="${i}" ${i === 0 ? 'disabled' : ''}>&uarr;</button>
+          <button class="op-btn secondary" data-down="${i}" ${i === page.buttons.length - 1 ? 'disabled' : ''}>&darr;</button>
+          <button class="op-btn secondary" data-edit="${b.id}">Edit</button>
+          <button class="op-btn danger" data-del="${b.id}">Remove</button>
+        </td>
+      </tr>`).join('') : '<tr><td colspan="8" class="op-muted">No buttons on this page yet.</td></tr>';
+
+    tb.querySelectorAll('[data-up]').forEach((el) => (el.onclick = () => moveBtn(page, Number(el.dataset.up), -1)));
+    tb.querySelectorAll('[data-down]').forEach((el) => (el.onclick = () => moveBtn(page, Number(el.dataset.down), 1)));
+    tb.querySelectorAll('[data-edit]').forEach((el) => (el.onclick = () => openButton(Number(el.dataset.edit))));
+    tb.querySelectorAll('[data-del]').forEach((el) => (el.onclick = () => removeButton(Number(el.dataset.del))));
+
+    // live preview (what POS will show for this page)
+    $('#preview').innerHTML = page.buttons.map((b) => {
+      const off = !b.active || (b.product_id != null && b.product_active === 0) ||
+        (b.link_page_id != null && b.link_page_active === 0);
+      const style = b.color ? ` style="background:${esc(b.color)}"` : '';
+      const name = b.label || (b.product_id != null ? b.product_name : b.link_page_name) || '?';
+      const price = b.product_id != null ? money(b.product_price_cents ?? 0) : '&rarr;';
+      return `<div class="prev-btn ${b.size} ${off ? 'off' : ''}"${style}>
+        <span>${esc(name)}</span><span class="price">${price}</span></div>`;
+    }).join('');
+
+    // generate row
+    $('#gen-group').hidden = !groups || !groups.length;
+    $('#btn-gen-group').hidden = !groups || !groups.length;
+  }
+
+  async function moveBtn(page, index, dir) {
+    const a = page.buttons[index], b = page.buttons[index + dir];
+    if (!a || !b) return;
+    try {
+      await op.api(`/api/menus/buttons/${a.id}/move`, { body: { position: b.position } });
+      await reload();
+    } catch { /* toast shown */ }
+  }
+
+  async function removeButton(id) {
+    try {
+      await op.api(`/api/menus/buttons/${id}`, { method: 'DELETE' });
+      op.toast('Button removed', 'ok');
+      await reload();
+    } catch { /* toast shown */ }
+  }
+
+  // ---- page modal ----
+  function openPage(page) {
+    editingPage = page;
+    const f = $('#page-form');
+    $('#page-modal-title').textContent = page ? `Edit ${page.name}` : 'New page';
+    f.name.value = page?.name ?? '';
+    f.sort.value = page?.sort ?? (pages.length ? Math.max(...pages.map((p) => p.sort)) + 1 : 0);
+    f.active.checked = page ? !!page.active : true;
+    $('#page-modal').showModal();
+  }
+  $('#btn-new-page').onclick = () => openPage(null);
+  $('#btn-edit-page').onclick = () => openPage(selected());
+
+  $('#page-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.currentTarget;
+    const body = { name: f.name.value, sort: Number(f.sort.value || 0), active: f.active.checked ? 1 : 0 };
+    try {
+      if (editingPage) {
+        await op.api(`/api/menus/pages/${editingPage.id}`, { method: 'PUT', body });
+      } else {
+        const r = await op.api('/api/menus/pages', { body });
+        selectedId = r.page.id;
+      }
+      op.toast('Page saved', 'ok');
+      $('#page-modal').close();
+      await reload();
+    } catch { /* toast shown */ }
+  });
+
+  $('#btn-del-page').onclick = async () => {
+    const page = selected();
+    if (!page) return;
+    const inbound = pages.reduce(
+      (a, p) => a + p.buttons.filter((b) => b.link_page_id === page.id).length, 0);
+    const msg = `Delete page "${page.name}" and its ${page.buttons.length} button(s)?` +
+      (inbound ? ` ${inbound} link button(s) on other pages will also be removed.` : '');
+    if (!confirm(msg)) return;
+    try {
+      await op.api(`/api/menus/pages/${page.id}`, { method: 'DELETE' });
+      op.toast('Page deleted', 'ok');
+      selectedId = null;
+      await reload();
+    } catch { /* toast shown */ }
+  };
+
+  // ---- button modal ----
+  function syncTypeFields() {
+    const f = $('#button-form');
+    const isProduct = f.type.value === 'product';
+    $('#fld-product').hidden = !isProduct;
+    $('#fld-link').hidden = isProduct;
+  }
+
+  function openButton(id) {
+    const page = selected();
+    if (!page) return;
+    editingButton = id ? page.buttons.find((b) => b.id === id) : null;
+    const f = $('#button-form');
+    $('#button-modal-title').textContent = editingButton ? 'Edit button' : 'New button';
+    f.product_id.innerHTML = products.map((p) =>
+      `<option value="${p.id}">${esc(p.name)} (${money(p.price_cents)})${p.active ? '' : ' — inactive'}</option>`).join('');
+    const others = pages.filter((p) => p.id !== page.id);
+    f.link_page_id.innerHTML = others.map((p) =>
+      `<option value="${p.id}">${esc(p.name)}${p.active ? '' : ' — inactive'}</option>`).join('');
+    f.type.value = editingButton && editingButton.link_page_id != null ? 'link' : 'product';
+    f.type.disabled = false;
+    if (editingButton?.product_id != null) f.product_id.value = editingButton.product_id;
+    if (editingButton?.link_page_id != null) f.link_page_id.value = editingButton.link_page_id;
+    f.position.value = editingButton?.position ?? '';
+    f.label.value = editingButton?.label ?? '';
+    f.color.value = editingButton?.color ?? '';
+    f.size.value = editingButton?.size ?? 'md';
+    f.active.checked = editingButton ? !!editingButton.active : true;
+    syncTypeFields();
+    $('#button-modal').showModal();
+  }
+  $('#btn-new-button').onclick = () => openButton(null);
+  $('#button-form').type.addEventListener('change', syncTypeFields);
+
+  $('#button-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const page = selected();
+    if (!page) return;
+    const f = e.currentTarget;
+    const isProduct = f.type.value === 'product';
+    if (isProduct && !f.product_id.value) { op.toast('Pick a product', 'err'); return; }
+    if (!isProduct && !f.link_page_id.value) { op.toast('Pick a target page (create a second page first)', 'err'); return; }
+    const body = {
+      product_id: isProduct ? Number(f.product_id.value) : null,
+      link_page_id: isProduct ? null : Number(f.link_page_id.value),
+      position: f.position.value ? Number(f.position.value) : null,
+      label: f.label.value,
+      color: f.color.value,
+      size: f.size.value,
+      active: f.active.checked ? 1 : 0,
+    };
+    try {
+      if (editingButton) {
+        await op.api(`/api/menus/buttons/${editingButton.id}`, { method: 'PUT', body });
+      } else {
+        await op.api(`/api/menus/pages/${page.id}/buttons`, { body });
+      }
+      op.toast('Button saved', 'ok');
+      $('#button-modal').close();
+      await reload();
+    } catch { /* toast shown */ }
+  });
+
+  // ---- generate ----
+  $('#btn-gen-catalog').onclick = async () => {
+    const page = selected();
+    if (!page) return;
+    try {
+      const r = await op.api(`/api/menus/pages/${page.id}/generate`, { body: { source: 'catalog' } });
+      op.toast(`Added ${r.added} button(s) from the catalog`, 'ok');
+      await reload();
+    } catch { /* toast shown */ }
+  };
+
+  $('#btn-gen-group').onclick = async () => {
+    const page = selected();
+    const gid = Number($('#gen-group').value);
+    if (!page || !gid) return;
+    try {
+      const r = await op.api(`/api/menus/pages/${page.id}/generate`, { body: { group_id: gid } });
+      op.toast(`Added ${r.added} button(s) from the group`, 'ok');
+      await reload();
+    } catch { /* toast shown */ }
+  };
+
+  // ---- boot ----
+  products = (await op.api('/api/catalog/products')).products;
+  // groups module is another team's — probe without an error toast if absent
+  try {
+    const r = await fetch('/api/groups');
+    if (r.ok) {
+      groups = (await r.json()).groups || [];
+      $('#gen-group').innerHTML = groups.map((g) => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
+    }
+  } catch { /* groups unavailable — catalog fallback only */ }
+  await reload();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Store Builder — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .sb-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .sb-head h2 { margin: 0; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  .form-grid .full { grid-column: 1 / -1; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+  .table-wrap { overflow-x: auto; }
+  td .op-btn { padding: 4px 10px; font-size: 13px; font-weight: 500; }
+  .hero-grid { display: grid; grid-template-columns: 1fr 1fr 180px; gap: 0 16px; align-items: end; }
+  .accent-row { display: flex; gap: 8px; align-items: center; }
+  .accent-row input[type="color"] { width: 44px; height: 34px; padding: 2px; }
+  .prod-picker { max-height: 240px; overflow-y: auto; border: 1px solid rgba(128,128,128,.35); border-radius: 8px; padding: 8px 10px; }
+  .prod-picker label { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+  .prod-picker .muted-note { opacity: .6; font-size: 12px; }
+  textarea[name="html"] { width: 100%; min-height: 140px; font: 13px/1.4 ui-monospace, monospace; }
+  .cfg-block { display: none; }
+  .cfg-block.on { display: block; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="op-card">
+    <div class="sb-head">
+      <h2>Store hero</h2>
+      <a class="op-btn secondary" href="/store/" target="_blank">Open store preview ↗</a>
+    </div>
+    <form id="hero-form" class="hero-grid">
+      <label class="op-field"><span>Hero title</span>
+        <input name="hero_title" placeholder="Owl Park" style="width:100%"></label>
+      <label class="op-field"><span>Hero subtitle</span>
+        <input name="hero_sub" placeholder="Default welcome text" style="width:100%"></label>
+      <div class="op-field"><span class="op-muted" style="font-size:13px">Accent color</span>
+        <div class="accent-row">
+          <input type="color" id="accent-pick" value="#3b4ed8">
+          <input name="accent" placeholder="default" style="width:90px">
+          <button class="op-btn">Save hero</button>
+        </div>
+      </div>
+    </form>
+    <p class="op-muted" style="font-size:13px">Leave fields empty to keep the store's built-in defaults. When no sections exist below, the store shows its standard landing page.</p>
+  </div>
+
+  <div class="op-card">
+    <div class="sb-head">
+      <h2>Landing sections</h2>
+      <button class="op-btn" id="btn-new-section">Add section</button>
+    </div>
+    <div class="table-wrap">
+      <table class="op-table" id="sections-table">
+        <thead><tr>
+          <th style="width:70px"></th><th>Title</th><th>Kind</th><th>Contents</th>
+          <th class="num">Sort</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="op-muted" style="font-size:13px">Sections appear on the guest store in this order. Only active sections show; products only ever appear if they are active and sold on the web channel.</p>
+  </div>
+</main>
+
+<dialog class="op-modal" id="section-modal">
+  <h2 id="section-modal-title">Add section</h2>
+  <form id="section-form" class="form-grid">
+    <label class="op-field"><span>Title</span><input name="title" required style="width:100%"></label>
+    <label class="op-field"><span>Kind</span>
+      <select name="kind" style="width:100%">
+        <option value="products">products — hand-picked</option>
+        <option value="groups">group — an item group</option>
+        <option value="html">html — rich text block</option>
+      </select>
+    </label>
+    <label class="op-field"><span>Sort</span><input name="sort" type="number" value="0" style="width:100%"></label>
+    <div class="op-field"><span class="op-muted" style="font-size:13px">Status</span>
+      <label style="display:flex;gap:6px;align-items:center;padding:8px 0">
+        <input type="checkbox" name="active" checked> Active (shown on the store)
+      </label>
+    </div>
+
+    <div class="op-field full cfg-block" id="cfg-products">
+      <span class="op-muted" style="font-size:13px">Products (web-channel only appear to guests)</span>
+      <div class="prod-picker" id="prod-picker"></div>
+    </div>
+    <div class="op-field full cfg-block" id="cfg-groups">
+      <label class="op-field"><span>Item group</span><select name="group_id" style="width:100%"></select></label>
+    </div>
+    <div class="op-field full cfg-block" id="cfg-html">
+      <label class="op-field"><span>HTML content</span><textarea name="html"></textarea></label>
+    </div>
+
+    <div class="modal-actions full">
+      <button type="button" class="op-btn secondary" data-close>Cancel</button>
+      <button class="op-btn">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  const me = await op.init({ page: '/store-builder.html' });
+  if (!me) return;
+
+  const $ = (sel) => document.querySelector(sel);
+  document.querySelectorAll('[data-close]').forEach((b) => {
+    b.onclick = () => b.closest('dialog').close();
+  });
+
+  let sections = [];
+  let products = [];   // all catalog products (to pick from + name lookups)
+  let groups = [];     // item groups, if the groups module is available
+  let groupsAvailable = true;
+  let editing = null;
+
+  const prodById = (id) => products.find((p) => p.id === id);
+  const groupById = (id) => groups.find((g) => g.id === id);
+
+  // ---- hero settings ----
+  async function loadHero() {
+    const { settings } = await op.api('/api/storefront/settings');
+    const f = $('#hero-form');
+    f.hero_title.value = settings.hero_title || '';
+    f.hero_sub.value = settings.hero_sub || '';
+    f.accent.value = settings.accent || '';
+    if (/^#[0-9a-fA-F]{6}$/.test(settings.accent)) $('#accent-pick').value = settings.accent;
+  }
+
+  $('#accent-pick').oninput = (e) => { $('#hero-form').accent.value = e.target.value; };
+
+  $('#hero-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.currentTarget;
+    try {
+      await op.api('/api/storefront/settings', {
+        method: 'PUT',
+        body: { hero_title: f.hero_title.value, hero_sub: f.hero_sub.value, accent: f.accent.value.trim() },
+      });
+      op.toast('Hero settings saved', 'ok');
+    } catch { /* toast shown */ }
+  });
+
+  // ---- sections ----
+  function contentsLabel(s) {
+    if (s.kind === 'products') {
+      const ids = s.config.product_ids || [];
+      const names = ids.map((id) => prodById(id)?.name || `#${id}`);
+      const head = names.slice(0, 3).join(', ');
+      return op.esc(names.length > 3 ? `${head} +${names.length - 3} more` : head || '—');
+    }
+    if (s.kind === 'groups') {
+      const g = groupById(s.config.group_id);
+      return op.esc(g ? g.name : `group #${s.config.group_id}`);
+    }
+    const text = String(s.config.html || '').replace(/<[^>]*>/g, ' ').trim();
+    return `<span class="op-muted">${op.esc(text.slice(0, 60) || '(empty html)')}</span>`;
+  }
+
+  function renderSections() {
+    const tb = $('#sections-table tbody');
+    tb.innerHTML = sections.map((s, i) => `
+      <tr>
+        <td style="white-space:nowrap">
+          <button class="op-btn secondary" data-move="${s.id}:-1" ${i === 0 ? 'disabled' : ''}>↑</button>
+          <button class="op-btn secondary" data-move="${s.id}:1" ${i === sections.length - 1 ? 'disabled' : ''}>↓</button>
+        </td>
+        <td>${op.esc(s.title)}</td>
+        <td>${op.esc(s.kind)}</td>
+        <td>${contentsLabel(s)}</td>
+        <td class="num">${s.sort}</td>
+        <td>${s.active ? '<span class="op-badge ok">active</span>' : '<span class="op-badge err">hidden</span>'}</td>
+        <td style="white-space:nowrap">
+          <button class="op-btn secondary" data-edit="${s.id}">Edit</button>
+          <button class="op-btn ${s.active ? 'danger' : 'ok'}" data-toggle="${s.id}">${s.active ? 'Hide' : 'Show'}</button>
+          <button class="op-btn danger" data-del="${s.id}">Delete</button>
+        </td>
+      </tr>`).join('') ||
+      '<tr><td colspan="7" class="op-muted">No sections yet — the store shows its standard landing page.</td></tr>';
+
+    tb.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openSection(Number(b.dataset.edit))));
+    tb.querySelectorAll('[data-toggle]').forEach((b) => (b.onclick = () => toggleSection(Number(b.dataset.toggle))));
+    tb.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => deleteSection(Number(b.dataset.del))));
+    tb.querySelectorAll('[data-move]').forEach((b) => (b.onclick = () => {
+      const [id, dir] = b.dataset.move.split(':').map(Number);
+      moveSection(id, dir);
+    }));
+  }
+
+  async function reloadSections() {
+    sections = (await op.api('/api/storefront/sections')).sections;
+    renderSections();
+  }
+
+  // Reorder by swapping with the neighbor; normalize sorts to index order first
+  // so rows created with equal sort values still move predictably.
+  async function moveSection(id, dir) {
+    const i = sections.findIndex((s) => s.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= sections.length) return;
+    const order = sections.map((s) => s.id);
+    [order[i], order[j]] = [order[j], order[i]];
+    try {
+      for (let k = 0; k < order.length; k++) {
+        const s = sections.find((x) => x.id === order[k]);
+        if (s.sort !== k) await op.api(`/api/storefront/sections/${s.id}`, { method: 'PUT', body: { sort: k } });
+      }
+      await reloadSections();
+    } catch { /* toast shown */ }
+  }
+
+  // ---- section modal ----
+  function showCfg(kind) {
+    for (const k of ['products', 'groups', 'html']) {
+      document.getElementById(`cfg-${k}`).classList.toggle('on', k === kind);
+    }
+  }
+
+  function renderProductPicker(selected) {
+    const sel = new Set(selected || []);
+    $('#prod-picker').innerHTML = products.map((p) => {
+      const web = String(p.channels).split(',').includes('web');
+      const note = [
+        !p.active ? 'inactive' : '',
+        !web ? 'not on web channel — will not show to guests' : '',
+      ].filter(Boolean).join(', ');
+      return `
+        <label>
+          <input type="checkbox" value="${p.id}" ${sel.has(p.id) ? 'checked' : ''}>
+          ${op.esc(p.name)} <code style="font-size:11px">${op.esc(p.sku)}</code>
+          ${note ? `<span class="muted-note">(${op.esc(note)})</span>` : ''}
+        </label>`;
+    }).join('') || '<p class="op-muted">No products in the catalog yet.</p>';
+  }
+
+  function renderGroupSelect(selected) {
+    const sel = $('#section-form').group_id;
+    if (!groupsAvailable) {
+      sel.innerHTML = '<option value="">Groups are not available</option>';
+      sel.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    sel.innerHTML = groups.map((g) => `<option value="${g.id}">${op.esc(g.name)}</option>`).join('') ||
+      '<option value="">No item groups defined yet</option>';
+    if (selected) sel.value = String(selected);
+  }
+
+  function openSection(id) {
+    editing = id ? sections.find((s) => s.id === id) : null;
+    const f = $('#section-form');
+    $('#section-modal-title').textContent = editing ? `Edit "${editing.title}"` : 'Add section';
+    f.title.value = editing?.title ?? '';
+    f.kind.value = editing?.kind ?? 'products';
+    f.sort.value = editing?.sort ?? (sections.length ? Math.max(...sections.map((s) => s.sort)) + 1 : 0);
+    f.active.checked = editing ? !!editing.active : true;
+    renderProductPicker(editing?.kind === 'products' ? editing.config.product_ids : []);
+    renderGroupSelect(editing?.kind === 'groups' ? editing.config.group_id : null);
+    f.html.value = editing?.kind === 'html' ? (editing.config.html || '') : '';
+    showCfg(f.kind.value);
+    $('#section-modal').showModal();
+  }
+
+  $('#section-form').kind.onchange = (e) => showCfg(e.target.value);
+  $('#btn-new-section').onclick = () => openSection(null);
+
+  $('#section-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.currentTarget;
+    const kind = f.kind.value;
+    let config;
+    if (kind === 'products') {
+      const ids = [...$('#prod-picker').querySelectorAll('input:checked')].map((i) => Number(i.value));
+      if (!ids.length) { op.toast('Pick at least one product', 'err'); return; }
+      config = { product_ids: ids };
+    } else if (kind === 'groups') {
+      const gid = Number(f.group_id.value);
+      if (!gid) { op.toast('Pick an item group', 'err'); return; }
+      config = { group_id: gid };
+    } else {
+      config = { html: f.html.value };
+    }
+    const body = {
+      title: f.title.value,
+      kind,
+      sort: Number(f.sort.value) || 0,
+      active: f.active.checked ? 1 : 0,
+      config,
+    };
+    try {
+      if (editing) {
+        await op.api(`/api/storefront/sections/${editing.id}`, { method: 'PUT', body });
+        op.toast('Section updated', 'ok');
+      } else {
+        await op.api('/api/storefront/sections', { body });
+        op.toast('Section added', 'ok');
+      }
+      $('#section-modal').close();
+      await reloadSections();
+    } catch { /* toast shown */ }
+  });
+
+  async function toggleSection(id) {
+    const s = sections.find((x) => x.id === id);
+    try {
+      await op.api(`/api/storefront/sections/${id}`, { method: 'PUT', body: { active: s.active ? 0 : 1 } });
+      op.toast(s.active ? `"${s.title}" hidden from the store` : `"${s.title}" is live`, 'ok');
+      await reloadSections();
+    } catch { /* toast shown */ }
+  }
+
+  async function deleteSection(id) {
+    const s = sections.find((x) => x.id === id);
+    if (!confirm(`Delete section "${s.title}"? This only removes the layout block, never products.`)) return;
+    try {
+      await op.api(`/api/storefront/sections/${id}`, { method: 'DELETE' });
+      op.toast('Section deleted', 'ok');
+      await reloadSections();
+    } catch { /* toast shown */ }
+  }
+
+  // ---- boot ----
+  try {
+    products = (await op.api('/api/catalog/products')).products;
+  } catch { products = []; }
+  try {
+    // raw fetch: op.api would toast an error when the groups module isn't installed
+    const res = await fetch('/api/groups');
+    if (!res.ok) throw new Error('groups unavailable');
+    groups = (await res.json()).groups || [];
+  } catch {
+    groupsAvailable = false; // groups module not installed — degrade gracefully
+  }
+  await Promise.all([loadHero(), reloadSections()]);
+})();
+</script>
+</body>
+</html>

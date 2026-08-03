@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Price Programs — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .pp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .pp-head h2 { margin: 0; }
+  .table-wrap { overflow-x: auto; }
+  td .op-btn { padding: 4px 10px; font-size: 13px; font-weight: 500; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  .form-grid .full { grid-column: 1 / -1; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+  .checks { display: flex; gap: 16px; padding: 6px 0; }
+  .checks label { display: flex; align-items: center; gap: 6px; }
+  #entries-modal { width: min(640px, 92vw); }
+  .add-row { display: flex; gap: 10px; align-items: flex-end; margin-top: 12px; flex-wrap: wrap; }
+  .add-row .op-field { margin-bottom: 0; flex: 1; min-width: 200px; }
+  .price-input { width: 110px; }
+  .base-strike { text-decoration: line-through; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="op-card">
+    <div class="pp-head">
+      <h2>Price programs</h2>
+      <button class="op-btn" id="btn-new-program">New program</button>
+    </div>
+    <div class="table-wrap">
+      <table class="op-table" id="programs-table">
+        <thead><tr>
+          <th>Name</th><th>Starts</th><th>Ends</th><th class="num">Priority</th>
+          <th class="num">Overrides</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="op-muted" style="font-size:13px">
+      A live program overrides product prices everywhere (POS and web) for its date range,
+      inclusive. When ranges overlap, the highest priority wins; ties go to the older program.
+    </p>
+  </div>
+</main>
+
+<dialog class="op-modal" id="program-modal">
+  <h2 id="program-modal-title">New program</h2>
+  <form id="program-form" class="form-grid">
+    <label class="op-field full"><span>Name</span><input name="name" required style="width:100%"></label>
+    <label class="op-field"><span>Starts on</span><input name="starts_on" type="date" required style="width:100%"></label>
+    <label class="op-field"><span>Ends on</span><input name="ends_on" type="date" required style="width:100%"></label>
+    <label class="op-field"><span>Priority</span><input name="priority" type="number" step="1" value="0" required style="width:100%"></label>
+    <div class="op-field checks"><label><input type="checkbox" name="active" checked> Active</label></div>
+    <div class="modal-actions full">
+      <button type="button" class="op-btn secondary" data-close>Cancel</button>
+      <button class="op-btn">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="op-modal" id="entries-modal">
+  <h2 id="entries-modal-title">Price overrides</h2>
+  <p class="op-muted" style="font-size:13px; margin-top:0">
+    Only listed products are overridden; everything else keeps its base price.
+  </p>
+  <div class="table-wrap">
+    <table class="op-table" id="entries-table">
+      <thead><tr><th>Product</th><th class="num">Base</th><th class="num">Override (USD)</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="add-row">
+    <label class="op-field"><span>Add product</span><select id="add-product" style="width:100%"></select></label>
+    <label class="op-field" style="flex:0"><span>Price (USD)</span>
+      <input id="add-price" class="price-input" type="number" step="0.01" min="0"></label>
+    <button type="button" class="op-btn secondary" id="btn-add-entry">Add</button>
+  </div>
+  <div class="modal-actions">
+    <button type="button" class="op-btn secondary" data-close>Cancel</button>
+    <button type="button" class="op-btn" id="btn-save-entries">Save overrides</button>
+  </div>
+</dialog>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  const me = await op.init({ page: '/price-programs.html' });
+  if (!me) return;
+
+  const $ = (sel) => document.querySelector(sel);
+  let today = '';
+  let programs = [];
+  let products = []; // union of pos+web sellable feeds (the product picker source)
+  let editingProgram = null;
+  let entriesProgram = null;
+  let entries = []; // [{product_id, price_cents}] currently in the editor
+
+  document.querySelectorAll('[data-close]').forEach((b) => {
+    b.onclick = () => b.closest('dialog').close();
+  });
+
+  const productById = (id) => products.find((p) => p.id === id);
+
+  function statusBadge(p) {
+    if (p.live) return '<span class="op-badge ok">live today</span>';
+    if (!p.active) return '<span class="op-badge err">inactive</span>';
+    if (p.starts_on > today) return '<span class="op-badge warn">scheduled</span>';
+    return '<span class="op-badge">ended</span>';
+  }
+
+  function renderPrograms() {
+    const tb = $('#programs-table tbody');
+    if (!programs.length) {
+      tb.innerHTML = '<tr><td colspan="7" class="op-muted">No price programs yet.</td></tr>';
+      return;
+    }
+    tb.innerHTML = programs.map((p) => `
+      <tr>
+        <td>${op.esc(p.name)}</td>
+        <td>${op.esc(p.starts_on)}</td>
+        <td>${op.esc(p.ends_on)}</td>
+        <td class="num">${p.priority}</td>
+        <td class="num">${p.entry_count}</td>
+        <td>${statusBadge(p)}</td>
+        <td style="white-space:nowrap" class="op-right">
+          <button class="op-btn secondary" data-prices="${p.id}">Prices</button>
+          <button class="op-btn secondary" data-edit="${p.id}">Edit</button>
+          <button class="op-btn danger" data-del="${p.id}">Delete</button>
+        </td>
+      </tr>`).join('');
+    tb.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openProgram(Number(b.dataset.edit))));
+    tb.querySelectorAll('[data-prices]').forEach((b) => (b.onclick = () => openEntries(Number(b.dataset.prices))));
+    tb.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => delProgram(Number(b.dataset.del))));
+  }
+
+  async function reload() {
+    const r = await op.api('/api/pricing/programs');
+    today = r.today;
+    programs = r.programs;
+    renderPrograms();
+  }
+
+  // Product picker source: union of both sellable channels so web-only and
+  // pos-only products are all overridable.
+  async function loadProducts() {
+    const [pos, web] = await Promise.all([
+      op.api('/api/catalog/sellable?channel=pos'),
+      op.api('/api/catalog/sellable?channel=web'),
+    ]);
+    const map = new Map();
+    for (const p of [...pos.products, ...web.products]) map.set(p.id, p);
+    products = [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // ---- program modal ----
+  function openProgram(id) {
+    editingProgram = id ? programs.find((p) => p.id === id) : null;
+    const f = $('#program-form');
+    $('#program-modal-title').textContent = editingProgram ? `Edit ${editingProgram.name}` : 'New program';
+    f.name.value = editingProgram?.name ?? '';
+    f.starts_on.value = editingProgram?.starts_on ?? today;
+    f.ends_on.value = editingProgram?.ends_on ?? today;
+    f.priority.value = editingProgram?.priority ?? 0;
+    f.active.checked = editingProgram ? !!editingProgram.active : true;
+    $('#program-modal').showModal();
+  }
+
+  $('#btn-new-program').onclick = () => openProgram(null);
+
+  $('#program-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.currentTarget;
+    const body = {
+      name: f.name.value,
+      starts_on: f.starts_on.value,
+      ends_on: f.ends_on.value,
+      priority: Number(f.priority.value),
+      active: f.active.checked ? 1 : 0,
+    };
+    try {
+      if (editingProgram) {
+        await op.api(`/api/pricing/programs/${editingProgram.id}`, { method: 'PUT', body });
+        op.toast('Program updated', 'ok');
+      } else {
+        await op.api('/api/pricing/programs', { body });
+        op.toast('Program created', 'ok');
+      }
+      $('#program-modal').close();
+      await reload();
+    } catch { /* toast already shown */ }
+  });
+
+  async function delProgram(id) {
+    const p = programs.find((x) => x.id === id);
+    if (!confirm(`Delete price program "${p.name}"? Products revert to base prices.`)) return;
+    try {
+      await op.api(`/api/pricing/programs/${id}`, { method: 'DELETE' });
+      op.toast('Program deleted', 'ok');
+      await reload();
+    } catch { /* toast shown */ }
+  }
+
+  // ---- overrides editor ----
+  function renderEntries() {
+    const tb = $('#entries-table tbody');
+    if (!entries.length) {
+      tb.innerHTML = '<tr><td colspan="4" class="op-muted">No overrides yet — add a product below.</td></tr>';
+    } else {
+      tb.innerHTML = entries.map((e, i) => {
+        const p = productById(e.product_id);
+        const name = p
+          ? `${op.esc(p.name)} <span class="op-muted">${op.esc(p.sku)}</span>`
+          : `product #${e.product_id}`;
+        const base = p ? op.money(p.price_cents) : '—';
+        return `
+          <tr>
+            <td>${name}</td>
+            <td class="num base-strike op-muted">${base}</td>
+            <td class="num"><input class="price-input" type="number" step="0.01" min="0"
+              value="${(e.price_cents / 100).toFixed(2)}" data-price="${i}"></td>
+            <td class="op-right"><button class="op-btn danger" data-remove="${i}">Remove</button></td>
+          </tr>`;
+      }).join('');
+    }
+    tb.querySelectorAll('[data-remove]').forEach((b) => (b.onclick = () => {
+      entries.splice(Number(b.dataset.remove), 1);
+      renderEntries();
+    }));
+    tb.querySelectorAll('[data-price]').forEach((inp) => (inp.onchange = () => {
+      entries[Number(inp.dataset.price)].price_cents = Math.round(Number(inp.value) * 100);
+    }));
+
+    const used = new Set(entries.map((e) => e.product_id));
+    $('#add-product').innerHTML = products
+      .filter((p) => !used.has(p.id))
+      .map((p) => `<option value="${p.id}">${op.esc(p.name)} (${op.esc(p.sku)}) — ${op.money(p.price_cents)}</option>`)
+      .join('');
+  }
+
+  async function openEntries(id) {
+    try {
+      const r = await op.api(`/api/pricing/programs/${id}`);
+      entriesProgram = r.program;
+      entries = r.entries.map((e) => ({ product_id: e.product_id, price_cents: e.price_cents }));
+      $('#entries-modal-title').textContent = `Price overrides — ${entriesProgram.name}`;
+      $('#add-price').value = '';
+      renderEntries();
+      $('#entries-modal').showModal();
+    } catch { /* toast shown */ }
+  }
+
+  $('#btn-add-entry').onclick = () => {
+    const pid = Number($('#add-product').value);
+    const price = Number($('#add-price').value);
+    if (!pid) { op.toast('Pick a product', 'err'); return; }
+    if (!($('#add-price').value !== '' && price >= 0)) { op.toast('Enter an override price', 'err'); return; }
+    entries.push({ product_id: pid, price_cents: Math.round(price * 100) });
+    $('#add-price').value = '';
+    renderEntries();
+  };
+
+  $('#btn-save-entries').onclick = async () => {
+    try {
+      await op.api(`/api/pricing/programs/${entriesProgram.id}/entries`, {
+        method: 'PUT',
+        body: { entries },
+      });
+      op.toast('Overrides saved', 'ok');
+      $('#entries-modal').close();
+      await reload();
+    } catch { /* toast shown */ }
+  };
+
+  await Promise.all([loadProducts(), reload()]);
+})();
+</script>
+</body>
+</html>
