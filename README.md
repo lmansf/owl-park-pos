@@ -23,6 +23,18 @@ node --test           # unit/module tests (tests/*.test.js)
 node tools/smoke.js   # end-to-end business loop against a scratch DB/server
 ```
 
+## Navigating the app
+
+Every page, role, and flow is documented in **[docs/user-guide.md](docs/user-guide.md)**;
+the same guide lives in-app under **Help** in the top navigation.
+
+## Deploying to Vercel
+
+The repo deploys as-is: `vercel.json` routes every request through one serverless
+function (`api/index.js`). The hosted database lives in `/tmp` and is **intentionally
+ephemeral** — each cold start reseeds the demo, and the UI shows a banner saying so.
+It's a demo deployment, not a system of record.
+
 ## Design
 
 Spec-driven via OpenSpec: see `openspec/changes/` for each change's proposal, design (module

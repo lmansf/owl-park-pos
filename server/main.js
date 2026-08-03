@@ -22,6 +22,13 @@ function createApp(dbPath = DB_PATH) {
   });
   auth.mount(router, db);
 
+  // Deployment self-description: hosted demos (Vercel) run with an ephemeral
+  // /tmp database that reseeds on cold start; the UI shows a banner when so.
+  router.get('/api/health', null, () => ({
+    ok: true,
+    ephemeral: Boolean(process.env.VERCEL),
+  }));
+
   // Auto-mount every module in server/modules/ (each exports mount(router, ctx))
   const ctx = { db, modules: {} };
   const modulesDir = path.join(__dirname, 'modules');

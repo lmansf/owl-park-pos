@@ -109,3 +109,9 @@ dialog.op-modal::backdrop { background: rgba(0,0,0,.6); }
   body { background: #fff; color: #000; }
   .op-card { border: none; background: #fff; }
 }
+
+.op-demo-banner {
+  background: rgba(240,180,41,.14); color: var(--warn);
+  border-bottom: 1px solid rgba(240,180,41,.35);
+  text-align: center; font-size: 13px; padding: 6px 12px;
+}

@@ -161,5 +161,14 @@ gs.init('home');
   }
 })();
 </script>
+<script>
+fetch('/api/health').then((r) => r.json()).then((h) => {
+  if (!h.ephemeral) return;
+  const n = document.createElement('div');
+  n.style.cssText = 'background:#fff3d6;color:#6b4d00;text-align:center;font-size:13px;padding:6px 12px';
+  n.textContent = 'Hosted demo — data resets periodically.';
+  document.body.prepend(n);
+}).catch(() => {});
+</script>
 </body>
 </html>

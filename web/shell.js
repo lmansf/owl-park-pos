@@ -15,6 +15,7 @@ window.op = (() => {
     { href: '/price-programs.html', label: 'Pricing', roles: ['admin', 'manager'] },
     { href: '/accounts.html', label: 'Accounts', roles: ['admin', 'manager'] },
     { href: '/reports.html', label: 'Reports', roles: ['admin', 'manager'] },
+    { href: '/help.html', label: 'Help', roles: ['admin', 'manager', 'cashier', 'gate'] },
   ];
 
   let me = null;
@@ -89,6 +90,13 @@ window.op = (() => {
       <nav class="op-nav">${links}</nav>
       <div class="op-user">${esc(me.display_name)} · ${me.role}<button id="op-logout">Sign out</button></div>`;
     document.body.prepend(bar);
+    fetch('/api/health').then((r) => r.json()).then((h) => {
+      if (!h.ephemeral) return;
+      const note = document.createElement('div');
+      note.className = 'op-demo-banner';
+      note.textContent = 'Hosted demo — the database is ephemeral and reseeds itself periodically. Changes are not saved.';
+      bar.after(note);
+    }).catch(() => {});
     document.getElementById('op-logout').onclick = async () => {
       await api('/api/auth/logout', { method: 'POST', body: {} });
       location.href = '/login.html';

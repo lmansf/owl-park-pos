@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .help-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .help-card h3 { margin: 0 0 6px; font-size: 15px; }
+  .help-card p { margin: 0; font-size: 13px; color: var(--muted); }
+  .help-card .roles { display: inline-block; margin-top: 8px; font-size: 11px; color: var(--accent); }
+  .flow ol { margin: 8px 0 0 18px; padding: 0; font-size: 14px; }
+  .flow li { margin-bottom: 6px; }
+  kbd { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="op-card">
+    <h2>Welcome aboard</h2>
+    <p class="op-muted">Owl Park Point of Sale — tickets, gates, members, events, store, and books, all in one
+    place. Demo sign-ins: <kbd>admin/admin</kbd> <kbd>manager/manager</kbd> <kbd>cashier/cashier</kbd>
+    <kbd>gate/gate</kbd>. The guest store lives at <a href="/store/" target="_blank">/store/</a> (no login).
+    Full manual: <code>docs/user-guide.md</code> in the repository.</p>
+  </div>
+
+  <div class="help-grid">
+    <div class="op-card help-card"><h3><a href="/index.html">Dashboard</a></h3>
+      <p>Today at a glance — revenue, orders, tickets, admits, members, next sessions with fill meters.</p>
+      <span class="roles">admin · manager · cashier</span></div>
+
+    <div class="op-card help-card"><h3><a href="/pos.html">POS</a></h3>
+      <p>Sell tickets, add-ons, memberships. Designed menu pages (or auto-grid), session picker for timed
+      events, discount codes, cash/card split tenders, printable receipts and ticket stubs. Order search
+      with manager void/refund.</p>
+      <span class="roles">admin · manager · cashier</span></div>
+
+    <div class="op-card help-card"><h3><a href="/admissions.html">Admissions</a></h3>
+      <p>The gate. Scan or type a <code>T-…</code> ticket or <code>M-…</code> pass and press Enter — big
+      OK/DENIED result with the reason. Session tickets admit from 30 min before start. Manager simulator
+      drawer for demo scans.</p>
+      <span class="roles">all roles</span></div>
+
+    <div class="op-card help-card"><h3><a href="/catalog.html">Catalog → Item Config</a></h3>
+      <p>The product list; click a row for the full-page item editor — price, tax, channels, validity,
+      groups, live price overrides, income account. Sold items deactivate, never delete.</p>
+      <span class="roles">admin · manager</span></div>
+
+    <div class="op-card help-card"><h3><a href="/item-groups.html">Groups</a></h3>
+      <p>Item groups with colors and a two-pane product picker. Feed the menu builder, store sections, and
+      item config.</p>
+      <span class="roles">admin · manager</span></div>
+
+    <div class="op-card help-card"><h3><a href="/events.html">Events</a></h3>
+      <p>Timed sessions: bulk-generate a schedule (dates, times, interval, capacity), watch fill colors,
+      raise capacity anytime — never below sold. Cancelling voids the session's tickets.</p>
+      <span class="roles">admin · manager</span></div>
+
+    <div class="op-card help-card"><h3><a href="/menu-builder.html">Menus</a></h3>
+      <p>Design the POS screen: pages of positioned buttons — products (label/color/size) or page links.
+      Generate from a group. No active pages = POS auto-grid fallback.</p>
+      <span class="roles">admin · manager</span></div>
+
+    <div class="op-card help-card"><h3><a href="/store-builder.html">Store Builder</a></h3>
+      <p>Guest store landing: hero title/subtitle/accent plus ordered sections (picked products, a group,
+      or HTML). Empty = built-in default layout.</p>
+      <span class="roles">admin · manager</span></div>
+
+    <div class="op-card help-card"><h3><a href="/discounts.html">Discounts</a></h3>
+      <p>Order-level codes, percent or amount. Same rules at POS and web checkout. Try the seeded
+      <code>SAVE10</code>.</p>
+      <span class="roles">admin · manager</span></div>
+
+    <div class="op-card help-card"><h3><a href="/price-programs.html">Pricing</a></h3>
+      <p>Date-ranged price programs with priority. A live program changes the price everywhere at once —
+      POS, store, carts, receipts. Highest priority wins on overlap.</p>
+      <span class="roles">admin · manager</span></div>
+
+    <div class="op-card help-card"><h3><a href="/accounts.html">Accounts</a></h3>
+      <p>Chart of accounts (defaults self-install), mappings for products/tax/tenders/discounts, and a
+      daily journal that always balances — unmapped revenue shows on 9999, refunds reverse on their day.
+      CSV export.</p>
+      <span class="roles">admin · manager (edits: admin)</span></div>
+
+    <div class="op-card help-card"><h3><a href="/members.html">Members</a></h3>
+      <p>Search members, view details, suspend/reinstate, print the barcode pass card. Sell and renew at
+      POS or in the store; renewals extend the same record.</p>
+      <span class="roles">admin · manager · cashier</span></div>
+
+    <div class="op-card help-card"><h3><a href="/reports.html">Reports</a></h3>
+      <p>Sales summary, product mix, admissions, memberships — date-ranged, totals row, CSV download.</p>
+      <span class="roles">admin · manager</span></div>
+  </div>
+
+  <div class="op-card flow">
+    <h2>A five-minute tour</h2>
+    <ol>
+      <li>As <kbd>cashier</kbd>, sell 2 Adult + a Planetarium session on <a href="/pos.html">POS</a> with
+        code <code>SAVE10</code>; tender $50 cash and print the stubs.</li>
+      <li>As <kbd>gate</kbd>, scan a ticket code on <a href="/admissions.html">Admissions</a> — green OK.
+        Scan it again — red DENIED, <em>exhausted</em>.</li>
+      <li>In the <a href="/store/" target="_blank">store</a>, buy a membership (any card number approves;
+        <code>4000 0000 0000 0002</code> declines), then scan the pass at the gate.</li>
+      <li>As <kbd>manager</kbd>, refund the first order in POS order search, then check
+        <a href="/reports.html">Reports</a> and the <a href="/accounts.html">Accounts</a> journal —
+        the day still balances.</li>
+    </ol>
+  </div>
+</main>
+<script src="/shell.js"></script>
+<script>op.init({ page: '/help.html' });</script>
+</body>
+</html>

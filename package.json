@@ -1,0 +1,11 @@
+{
+  "name": "owl-park-pos",
+  "private": true,
+  "description": "Owl Park Point of Sale — self-contained attractions ticketing suite (zero dependencies)",
+  "engines": { "node": "22.x" },
+  "scripts": {
+    "start": "node server/main.js",
+    "test": "node --test",
+    "smoke": "node tools/smoke.js"
+  }
+}
