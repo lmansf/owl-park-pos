@@ -37,7 +37,7 @@ declares allowed roles and returns 401 (no session) or 403 (wrong role).
 
 #### Scenario: Login flow
 - **WHEN** valid credentials are posted to `/api/auth/login`
-- **THEN** a session row is created, the cookie is set, and `GET /api/auth/me` returns the
+- **THEN** a signed session cookie is set, and `GET /api/auth/me` returns the
   user's name and role until logout or expiry (12h).
 
 ### Requirement: Back-office app shell

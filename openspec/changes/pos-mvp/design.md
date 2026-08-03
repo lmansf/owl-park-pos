@@ -45,7 +45,7 @@ tests/<name>.test.js node:test per module, run with `node --test tests/`
 
 ### Core tables (owned by platform-core migrations 001–003)
 - `users(id, username UNIQUE, pass_hash, display_name, role, active)`
-- `sessions(sid, user_id, created_at, expires_at)`
+- `sessions(sid, user_id, created_at, expires_at)` — retained in schema; sessions are stateless signed cookies since the Vercel deployment (see core/auth.js)
 - `settings(key PRIMARY KEY, value)`
 - `audit_log(id, at, user_id, action, detail)`
 

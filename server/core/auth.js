@@ -26,19 +26,53 @@ function randomCode(prefix, len) {
   return prefix + out;
 }
 
+// Sessions are stateless signed tokens (HMAC), not DB rows: on serverless hosts
+// each instance has its own SQLite file, so a DB session written by one instance
+// would be invisible to the next. Set OWLPOS_SECRET in multi-instance deployments
+// so every instance verifies the same signature; locally the per-process fallback
+// is fine. Logout clears the cookie (tokens are not revocable before expiry —
+// acceptable for demo-grade auth).
+const SECRET = process.env.OWLPOS_SECRET || crypto.randomBytes(32).toString('hex');
+
+function signToken(username, expEpochMs) {
+  const payload = `${Buffer.from(username).toString('base64url')}.${expEpochMs}`;
+  const sig = crypto.createHmac('sha256', SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function parseToken(token) {
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3) return null;
+  const payload = `${parts[0]}.${parts[1]}`;
+  const expect = crypto.createHmac('sha256', SECRET).update(payload).digest('base64url');
+  const given = Buffer.from(parts[2]);
+  const want = Buffer.from(expect);
+  if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) return null;
+  const exp = Number(parts[1]);
+  if (!Number.isFinite(exp) || exp <= Date.now()) return null;
+  try {
+    return { username: Buffer.from(parts[0], 'base64url').toString('utf8'), exp };
+  } catch {
+    return null;
+  }
+}
+
 function resolveUser(db) {
   return (req) => {
-    const sid = req.cookies?.opsid;
-    if (!sid) return null;
+    const token = parseToken(req.cookies?.opsid);
+    if (!token) return null;
     const row = db
       .prepare(
-        `SELECT u.id, u.username, u.display_name, u.role
-         FROM sessions s JOIN users u ON u.id = s.user_id
-         WHERE s.sid = ? AND s.expires_at > ? AND u.active = 1`
+        `SELECT id, username, display_name, role FROM users
+         WHERE username = ? AND active = 1`
       )
-      .get(sid, now());
+      .get(token.username);
     return row || null;
   };
+}
+
+function cookieFlags() {
+  return `Path=/; HttpOnly; SameSite=Lax${process.env.VERCEL ? '; Secure' : ''}`;
 }
 
 function audit(db, userId, action, detail) {
@@ -55,20 +89,14 @@ function mount(router, db) {
     if (!user || !verifyPassword(String(password || ''), user.pass_hash)) {
       throw new ApiError(401, 'bad_credentials', 'Wrong username or password');
     }
-    const sid = crypto.randomBytes(24).toString('hex');
-    const expires = new Date(Date.now() + SESSION_HOURS * 3600_000).toISOString();
-    db.prepare('INSERT INTO sessions (sid, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
-      .run(sid, user.id, now(), expires);
-    db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now());
+    const token = signToken(user.username, Date.now() + SESSION_HOURS * 3600_000);
     audit(db, user.id, 'auth.login', { username: user.username });
-    res.setHeader('set-cookie', `opsid=${sid}; Path=/; HttpOnly; SameSite=Lax`);
+    res.setHeader('set-cookie', `opsid=${token}; ${cookieFlags()}`);
     return { user: publicUser(user) };
   });
 
   router.post('/api/auth/logout', [], (req, res) => {
-    const sid = req.cookies?.opsid;
-    if (sid) db.prepare('DELETE FROM sessions WHERE sid = ?').run(sid);
-    res.setHeader('set-cookie', 'opsid=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+    res.setHeader('set-cookie', `opsid=; ${cookieFlags()}; Max-Age=0`);
     return { ok: true };
   });
 
