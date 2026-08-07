@@ -19,6 +19,7 @@ const BOOTSTRAP = 'operator-bootstrap-pass';
 const PROD_ENV = {
   OWLPOS_MODE: 'production', OWLPOS_SECRET: 'ef'.repeat(32),
   OWLPOS_BOOTSTRAP_ADMIN_PASSWORD: BOOTSTRAP,
+  OWLPOS_INIT_DB: '1', // deliberate first boot on a scratch path
 };
 
 function tempDb() {

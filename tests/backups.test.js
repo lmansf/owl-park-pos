@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const { DatabaseSync } = require('node:sqlite');
 
 const { createApp } = require('../server/main');
@@ -319,23 +319,41 @@ test('backups: restore live-server and failure-atomicity guards', async (t) => {
   db.close();
   const dataDir = path.dirname(dbPath);
 
-  await t.test('refuses while WAL/SHM sidecars exist (server running / unclean shutdown)', () => {
-    // -shm exists exactly while a connection is open (or after a crash) — a
-    // 10s-idle running server must not slip past the old mtime heuristic
-    fs.writeFileSync(dbPath + '-shm', '');
+  await t.test('refuses while another process still holds the database open', () => {
+    // The real hazard is a live server, and it is detected by probing for
+    // exclusive access — not by looking for sidecar files. This connection is
+    // idle with no transaction in flight, exactly like a server between sales.
+    const live = new DatabaseSync(dbPath);
+    live.exec('PRAGMA journal_mode = WAL');
     const before = fs.statSync(dbPath).mtimeMs;
-    assert.throws(
-      () => execFileSync(process.execPath, [RESTORE, snapPath, '--db', dbPath], { stdio: 'pipe' }),
-      /still running|shut/i
-    );
-    assert.equal(fs.statSync(dbPath).mtimeMs, before, 'target untouched');
-    assert.ok(!fs.readdirSync(dataDir).some((f) => f.includes('-pre-restore-')),
-      'nothing was moved aside');
-    // --force overrides, loudly, for the crash-leftover case
-    const out = execFileSync(process.execPath,
-      [RESTORE, snapPath, '--db', dbPath, '--force'], { stdio: 'pipe', encoding: 'utf8' });
-    assert.ok(JSON.parse(out).ok);
-    fs.rmSync(dbPath + '-shm', { force: true });
+    try {
+      assert.throws(
+        () => execFileSync(process.execPath, [RESTORE, snapPath, '--db', dbPath], { stdio: 'pipe' }),
+        /still open by another process/i
+      );
+      assert.equal(fs.statSync(dbPath).mtimeMs, before, 'target untouched');
+      assert.ok(!fs.readdirSync(dataDir).some((f) => f.includes('-pre-restore-')),
+        'nothing was moved aside');
+    } finally {
+      live.close();
+    }
+  });
+
+  await t.test('runs without --force after a stop that left sidecars behind', () => {
+    // A killed server leaves -wal/-shm with nothing alive. The documented
+    // runbook has to work here: a guard that always fires would just train
+    // operators to pass --force, which is the flag that disables the guard.
+    fs.writeFileSync(dbPath + '-wal', '');
+    fs.writeFileSync(dbPath + '-shm', '');
+    const out = execFileSync(process.execPath, [RESTORE, snapPath, '--db', dbPath],
+      { stdio: 'pipe', encoding: 'utf8' });
+    const res = JSON.parse(out);
+    assert.ok(res.ok);
+    assert.ok(!fs.existsSync(dbPath + '-wal') && !fs.existsSync(dbPath + '-shm'),
+      'stale sidecars are gone, never replayable over the restored file');
+    // the preserved copy is a whole database too — same secrets, same 0600
+    assert.equal(fs.statSync(res.pre_restore).mode & 0o777, 0o600, 'pre-restore copy is private');
+    assert.equal(fs.statSync(dbPath).mode & 0o777, 0o600, 'restored database is private');
   });
 
   await t.test('refuses to restore the target onto itself', () => {
@@ -378,6 +396,45 @@ test('backups: restore live-server and failure-atomicity guards', async (t) => {
     assert.deepEqual(fs.readdirSync(dataDir).sort(), pre.sort(),
       'no staging/pre-restore litter after rollback');
   });
+});
+
+test('backups: the documented runbook — stop the real server, then restore', async () => {
+  // End to end, exactly as docs/user-guide.md tells an operator to do it: no
+  // --force anywhere. A guard that fires after every ordinary stop would make
+  // --force a habit, and --force is the thing that disables the guard.
+  const { server, db, ctx, base, dbPath } = await startServer();
+  const admin = await login(base, 'admin');
+  const cashier = await login(base, 'cashier');
+  await sellOne(cashier);
+  const snapName = (await admin('POST', '/api/backups/run', {})).data.backup.file;
+  const snapPath = path.join(ctx.backupDir, snapName);
+  await new Promise((resolve) => server.close(resolve));
+  db.close();
+
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'main.js')], {
+    // port 0 → ephemeral; these tests never bind 4650
+    env: { ...process.env, OWLPOS_DB: dbPath, OWLPOS_PORT: '0', OWLPOS_BACKUP_DIR: ctx.backupDir },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const exited = new Promise((resolve) => child.on('exit', resolve));
+  await new Promise((resolve, reject) => {
+    let out = '';
+    child.stdout.on('data', (chunk) => {
+      out += chunk;
+      if (out.includes('server.listen')) resolve();
+    });
+    child.on('exit', (code) => reject(new Error(`server exited early (${code})\n${out}`)));
+  });
+  assert.ok(fs.existsSync(dbPath + '-wal'), 'a running server holds a WAL');
+
+  child.kill('SIGTERM'); // what Ctrl-C and `systemctl stop` both send
+  assert.equal(await exited, 0, 'the server exits cleanly on SIGTERM');
+  assert.ok(!fs.existsSync(dbPath + '-wal') && !fs.existsSync(dbPath + '-shm'),
+    'a stopped server leaves no sidecars behind');
+
+  const out = execFileSync(process.execPath, [RESTORE, snapPath, '--db', dbPath],
+    { stdio: 'pipe', encoding: 'utf8' });
+  assert.ok(JSON.parse(out).ok, 'the runbook completes without --force');
 });
 
 test('backups: snapshot DELETE works with an unnormalized OWLPOS_BACKUP_DIR', async (t) => {

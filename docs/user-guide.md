@@ -197,12 +197,19 @@ stays private to its holder, since anyone knowing the email could open the order
 - **Production mode:** set `OWLPOS_MODE=production`, a strong `OWLPOS_SECRET`
   (at least 32 bytes, e.g. 64 hex chars) and, when seeding a fresh database,
   `OWLPOS_BOOTSTRAP_ADMIN_PASSWORD` (at least 12 chars) — the server refuses to start
-  without them. A production seed never creates a usable demo credential: `admin` takes
+  without them. It also refuses to start when `OWLPOS_DB` points at a database that is
+  not there: a typo'd path or an unmounted data volume must not quietly seed a fresh
+  demo park that staff then sell a full day against. For the deliberate first boot, set
+  `OWLPOS_INIT_DB=1` once, then take it back out of the unit file. A production seed never creates a usable demo credential: `admin` takes
   the bootstrap password (and must still choose their own at first sign-in), while
   `manager`/`cashier`/`gate` are created disabled. Enable the ones you need with
   `OWLPOS_USER_PASSWORD=<temp password> node tools/users.js activate <username>` (also
   `list`, `deactivate`, `set-password`) — each activated account signs in with its
-  temporary password and must rotate it before anything else works. A database still
+  temporary password and must rotate it before anything else works. The server waits out
+  brief write-lock collisions (a 5 s SQLite busy timeout), so running these against a
+  live database no longer 500s a sale mid-tender; the CLI itself still opens without a
+  wait, so if it ever reports `database is locked`, simply run it again — repeating
+  `activate` or `set-password` is harmless. A database still
   carrying an active demo password (from a demo-mode seed or a restored demo snapshot)
   refuses to start in production until those accounts are rotated or deactivated.
   Session cookies are marked `Secure` (put the server behind HTTPS), and the login page
@@ -223,7 +230,9 @@ stays private to its holder, since anyone knowing the email could open the order
 - **Where snapshots live:** `data/backups/owlpark-<timestamp>-<scheduled|manual>.db`
   (directory overridable via env `OWLPOS_BACKUP_DIR`), file mode 0600. Each snapshot is the complete database (including staff password hashes
   and member emails) — copy the folder offsite regularly (`rsync data/backups/ …`) and
-  treat the copies as sensitive.
+  treat the copies as sensitive. The live database and its `-wal`/`-shm` files are 0600
+  too, and are re-tightened on every start: they hold the same password hashes, member
+  PII and plaintext gate codes, and anyone who can read the file can walk in free.
 - **Taking one:** the Backups page (**Back up now**) or wait for the scheduler. Tune with
   `settings` keys `backups.interval_min` (0 disables the scheduler) and `backups.retain`,
   or env `OWLPOS_BACKUP_INTERVAL_MIN` / `OWLPOS_BACKUP_RETAIN`. The scheduler reads
@@ -238,11 +247,20 @@ stays private to its holder, since anyone knowing the email could open the order
   The tool verifies the snapshot's integrity, refuses snapshots created by newer code
   than this checkout, keeps your current database beside the restored one as
   `owlpark-pos-pre-restore-<timestamp>.db`, and records the restore in the audit log.
-  Older snapshots are fine — pending migrations apply on the next start. While the
-  database's `-wal`/`-shm` sidecar files exist the tool refuses to run — they mean the
-  server is still running (stop it first) or crashed without a clean shutdown; only in
-  the crash case pass `--force` to proceed anyway. Any failure mid-restore rolls back
-  and leaves your original database in place. Use `--db <path>` for a non-default
-  database location.
+  Older snapshots are fine — pending migrations apply on the next start. Before touching
+  anything the tool *probes* whether the database is still open by another process (it
+  asks SQLite for exclusive access — the `-wal`/`-shm` files on their own prove nothing,
+  since a crash leaves them behind). If something still holds it, the tool refuses: stop
+  that process. `--force` overrides, loudly, and should stay a last resort — restoring
+  under a live server strands every transaction it writes afterwards. Any failure
+  mid-restore rolls back and leaves your original database in place. Use `--db <path>`
+  for a non-default database location. Both the restored database and the preserved
+  pre-restore copy are left at mode 0600.
+- **Stopping the server:** Ctrl-C, or `SIGTERM` from systemd. The server stops accepting
+  requests, lets in-flight ones finish (up to 5 s), checkpoints the write-ahead log and
+  closes the database — which is what removes the `-wal`/`-shm` files and leaves a
+  single self-contained database file for backup or restore. `SIGKILL` skips all of
+  that; the next start recovers the WAL automatically, and restore still works because
+  it probes rather than looks for sidecars.
 - **Health:** `/api/health` shows disk-free, database size, and last-backup time to
   signed-in admins/managers; the shell shows a persistent banner when disk is low.

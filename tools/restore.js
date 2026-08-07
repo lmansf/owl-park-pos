@@ -1,14 +1,18 @@
 'use strict';
 // Offline restore: node tools/restore.js <backup-file> [--db <path>] [--force]
-// STOP THE SERVER FIRST. Verifies the snapshot (integrity + schema no newer than
-// this checkout), preserves the current DB as owlpark-…-pre-restore-<ts>.db, then
-// copies the snapshot into place. Exits non-zero on any failure.
+// STOP THE SERVER FIRST — the tool probes whether anything still holds the
+// database open and refuses if so. Verifies the snapshot (integrity + schema no
+// newer than this checkout), preserves the current DB as
+// owlpark-…-pre-restore-<ts>.db, then copies the snapshot into place. Every
+// database file it leaves behind is mode 0600. Exits non-zero on any failure.
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
 const ROOT = path.join(__dirname, '..');
 const NAME_RE = /^owlpark-\d{8}T\d{6}(?:-\d+)?-(scheduled|manual)\.db$/;
+const PROBE_TIMEOUT_MS = 2000; // ride out a momentary lock before calling it live
+const DB_FILE_MODE = 0o600;    // scrypt hashes, member PII, plaintext gate codes
 
 function fail(msg) {
   console.error(`restore: ${msg}`);
@@ -18,6 +22,32 @@ function fail(msg) {
 function tsName(d = new Date()) {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}T${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+// True when another process still has the database open. Taking a WAL database
+// out of WAL mode requires exclusive access, so SQLITE_BUSY here is proof of a
+// live connection — unlike the -wal/-shm files, which a killed server leaves
+// behind forever (the server now closes cleanly, but crashes still happen).
+// When nothing holds it, the same statement checkpoints the WAL back into the
+// database, so the copy we are about to preserve is complete on its own.
+// Any other error (a corrupt or read-only file — the very reason to restore)
+// is not evidence of a live server and must not block recovery.
+function inUse(dbPath) {
+  let db = null;
+  try {
+    db = new DatabaseSync(dbPath);
+    db.exec(`PRAGMA busy_timeout = ${PROBE_TIMEOUT_MS}`);
+    db.exec('PRAGMA journal_mode = DELETE');
+    return false;
+  } catch (err) {
+    if (err.errcode === 5 || err.errcode === 6 || /database is locked/i.test(err.message)) {
+      return true;
+    }
+    console.error(`restore: could not probe ${path.basename(dbPath)} (${err.message}) — continuing`);
+    return false;
+  } finally {
+    try { db?.close(); } catch { /* never opened, or already gone */ }
+  }
 }
 
 function main() {
@@ -57,22 +87,19 @@ function main() {
     fail('snapshot and target are the same file — nothing to restore');
   }
 
-  // Live-server refusal: SQLite keeps -wal/-shm sidecars beside the DB for as
-  // long as ANY connection is open, and removes them on the last clean close —
-  // so their presence means the server is still running (any write after this
-  // restore would be silently stranded in the pre-restore copy) or it crashed
-  // without cleaning up. Only --force, with a loud warning, may proceed; the
-  // crash-leftover case is exactly what --force exists for.
-  const sidecars = ['-wal', '-shm'].filter((ext) => fs.existsSync(dbPath + ext));
-  if (sidecars.length) {
-    const names = sidecars.map((ext) => path.basename(dbPath + ext)).join(' and ');
+  // Live-server refusal, measured rather than guessed. Sidecar files are NOT
+  // evidence: a stopped server can leave them behind. inUse() asks SQLite
+  // itself whether anything still holds the database open.
+  if (fs.existsSync(dbPath) && inUse(dbPath)) {
+    const name = path.basename(dbPath);
     if (!force) {
-      fail(`${names} exist beside the database — the server is still running, or did not shut ` +
-        'down cleanly. STOP THE SERVER FIRST; pass --force only if you are certain nothing has this database open');
+      fail(`${name} is still open by another process — the server is running. STOP THE SERVER ` +
+        'FIRST (Ctrl-C, or systemctl stop; it closes the database cleanly), then run this again. ' +
+        'Pass --force only if you are certain nothing has this database open');
     }
-    console.error(`restore: WARNING — ${names} exist; if the server is still running it will keep ` +
-      'writing to the pre-restore copy and every transaction after this restore will be LOST on its ' +
-      'next restart. Continuing because of --force.');
+    console.error(`restore: WARNING — ${name} is still open by another process; if that is the ` +
+      'server it will keep writing to the pre-restore copy and every transaction after this ' +
+      'restore will be LOST on its next restart. Continuing because of --force.');
   }
 
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -84,7 +111,7 @@ function main() {
   fs.rmSync(staging, { force: true });
   try {
     fs.copyFileSync(snapshot, staging);
-    fs.chmodSync(staging, 0o600);
+    fs.chmodSync(staging, DB_FILE_MODE);
   } catch (err) {
     fs.rmSync(staging, { force: true });
     fail(`could not stage the snapshot copy (${err.message}) — database untouched`);
@@ -109,12 +136,18 @@ function main() {
           renamed.push([dbPath + ext, preRestore + ext]);
         }
       }
+      // The preserved copy is a full database too — same secrets, same 0600 as
+      // every snapshot; a restore must not leave a world-readable one behind.
+      for (const ext of ['', '-wal', '-shm']) {
+        try { fs.chmodSync(preRestore + ext, DB_FILE_MODE); } catch { /* not present */ }
+      }
     }
     fs.renameSync(staging, dbPath);
     placed = true;
 
     // Record the restore in the restored DB's own audit trail.
     const db = new DatabaseSync(dbPath);
+    db.exec(`PRAGMA busy_timeout = ${PROBE_TIMEOUT_MS}`);
     try {
       db.prepare('INSERT INTO audit_log (at, user_id, action, detail) VALUES (?, NULL, ?, ?)')
         .run(new Date().toISOString(), 'backups.restore',
