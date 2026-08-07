@@ -34,8 +34,9 @@ auto-generated grid — the sell flow must never be blocked by menu configuratio
 
 ### Requirement: Referential safety
 
-Deleting a page with buttons requires confirmation and removes its buttons; a page-link
-button whose target page is deleted or inactive is omitted from /api/menus/active.
+Deleting a page with buttons SHALL require confirmation and remove its buttons; a
+page-link button whose target page is deleted or inactive SHALL be omitted from
+/api/menus/active.
 
 #### Scenario: No dead links at the terminal
 - **WHEN** a linked page is deactivated
