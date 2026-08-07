@@ -508,7 +508,7 @@ test('pos: pricing, posting path, tenders, void/refund', async (t) => {
     }
   });
 
-  await t.test('qty=2 membership line posts one member with doubled duration', async () => {
+  await t.test('qty=2 membership line posts TWO members, one year each', async () => {
     const r = await cashier('POST', '/api/pos/orders', {
       lines: [
         { product_id: memExp.id, qty: 2, member: { name: 'Twice Over', email: 'twice@example.com' } },
@@ -517,10 +517,68 @@ test('pos: pricing, posting path, tenders, void/refund', async (t) => {
     const fin = await cashier('POST', `/api/pos/orders/${r.data.order.id}/finalize`, {
       payments: [{ method: 'card_sim', amount_cents: r.data.order.total_cents }],
     });
-    assert.equal(fin.data.members.length, 2); // one entry per unit…
-    assert.equal(fin.data.members[1].id, fin.data.members[0].id); // …same member
-    const gainDays = (Date.parse(fin.data.members[1].expires_at) - Date.now()) / (24 * 3600 * 1000);
-    assert.ok(gainDays > 729 && gainDays < 731, `expected ~730 days, got ${gainDays}`);
+    // two memberships paid for = two memberships delivered, never one with double
+    // duration (which would hand the second guest a copy of the first one's pass)
+    assert.equal(fin.data.members.length, 2);
+    assert.notEqual(fin.data.members[1].id, fin.data.members[0].id);
+    assert.notEqual(fin.data.members[1].member_no, fin.data.members[0].member_no);
+    assert.notEqual(fin.data.members[1].pass_code, fin.data.members[0].pass_code);
+    for (const m of fin.data.members) {
+      assert.equal(m.email, 'twice@example.com'); // the email survives the create path
+      const gainDays = (Date.parse(m.expires_at) - Date.now()) / (24 * 3600 * 1000);
+      assert.ok(gainDays > 364 && gainDays < 366, `expected ~365 days, got ${gainDays}`);
+    }
+    const rows = db
+      .prepare("SELECT * FROM members WHERE lower(email) = 'twice@example.com' ORDER BY id")
+      .all();
+    assert.equal(rows.length, 2);
+    assert.equal(rows.filter((m) => m.status === 'active').length, 2);
+  });
+
+  await t.test('two named members on one household email each get their own membership', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [
+        { product_id: memExp.id, qty: 1, member: { name: 'Bob Household', email: 'house@example.com' } },
+        { product_id: memExp.id, qty: 1, member: { name: 'Alice Household', email: 'house@example.com' } },
+      ],
+    });
+    const fin = await cashier('POST', `/api/pos/orders/${r.data.order.id}/finalize`, {
+      payments: [{ method: 'card_sim', amount_cents: r.data.order.total_cents }],
+    });
+    assert.equal(fin.status, 200);
+    const names = fin.data.members.map((m) => m.name).sort();
+    assert.deepEqual(names, ['Alice Household', 'Bob Household']);
+    const rows = db
+      .prepare("SELECT * FROM members WHERE lower(email) = 'house@example.com' ORDER BY id")
+      .all();
+    assert.equal(rows.length, 2, 'Alice must not be swallowed by Bob’s record');
+    assert.deepEqual(rows.map((m) => m.name).sort(), ['Alice Household', 'Bob Household']);
+    for (const m of rows) {
+      const days = (Date.parse(m.expires_at) - Date.now()) / (24 * 3600 * 1000);
+      assert.ok(days > 364 && days < 366, `one year each, got ${days}`);
+    }
+  });
+
+  await t.test('a bare line (no member named) still renews the buyer’s own membership', async () => {
+    const first = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: memExp.id, qty: 1 }],
+      customer: { name: 'Solo Buyer', email: 'solo@example.com' },
+    });
+    const finA = await cashier('POST', `/api/pos/orders/${first.data.order.id}/finalize`, {
+      payments: [{ method: 'card_sim', amount_cents: first.data.order.total_cents }],
+    });
+    const second = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: memExp.id, qty: 1 }],
+      customer: { name: 'Solo Buyer', email: 'solo@example.com' },
+    });
+    const finB = await cashier('POST', `/api/pos/orders/${second.data.order.id}/finalize`, {
+      payments: [{ method: 'card_sim', amount_cents: second.data.order.total_cents }],
+    });
+    assert.equal(finB.data.members[0].id, finA.data.members[0].id);
+    const gain =
+      (Date.parse(finB.data.members[0].expires_at) - Date.parse(finA.data.members[0].expires_at))
+      / (24 * 3600 * 1000);
+    assert.ok(gain > 364 && gain < 366, `renewal extends by a year, got ${gain}`);
   });
 
   await t.test('member_intent is server-written only; oversized names are capped', async () => {
@@ -930,4 +988,107 @@ test('pos: guest checkout cannot smuggle a tender — server builds card_sim its
   assert.match(pays[0].ref, /^CARD-4242$/);
   // guest order view exposes no payments/tender data
   assert.equal(data.order.payments, undefined);
+});
+
+test('pos: a timed-entry ticket is always valid on the day of its session', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const cashier = client(base);
+  await cashier('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+
+  const plntm = db.prepare("SELECT * FROM products WHERE sku = 'PLNTM'").get();
+  // a season schedule opened for advance sale further out than validity_days:
+  // the ticket must still be alive when the guest turns up (admissions denies on
+  // valid_to before it ever considers the session window)
+  db.prepare('UPDATE products SET validity_days = 1 WHERE id = ?').run(plntm.id);
+  const startsAt = new Date(Date.now() + 45 * 24 * 3600 * 1000).toISOString();
+  const endsAt = new Date(Date.now() + 45 * 24 * 3600 * 1000 + 3600_000).toISOString();
+  const far = Number(
+    db.prepare(
+      'INSERT INTO event_sessions (event_id, starts_at, ends_at, capacity) VALUES (?, ?, ?, 20)'
+    ).run(plntm.event_id, startsAt, endsAt).lastInsertRowid
+  );
+
+  const r = await cashier('POST', '/api/pos/orders', {
+    lines: [{ product_id: plntm.id, qty: 1, event_session_id: far }],
+  });
+  assert.equal(r.status, 200);
+  const fin = await cashier('POST', `/api/pos/orders/${r.data.order.id}/finalize`, {
+    payments: [{ method: 'card_sim', amount_cents: r.data.order.total_cents }],
+  });
+  assert.equal(fin.status, 200);
+  const ticket = fin.data.tickets[0];
+  assert.ok(
+    Date.parse(ticket.valid_to) >= Date.parse(endsAt),
+    `ticket expires ${ticket.valid_to}, before its own session ends ${endsAt}`
+  );
+
+  // an untimed line keeps the plain purchase-date window
+  const adult = db.prepare("SELECT * FROM products WHERE sku = 'ADULT'").get();
+  db.prepare('UPDATE products SET validity_days = 2 WHERE id = ?').run(adult.id);
+  const o2 = await cashier('POST', '/api/pos/orders', { lines: [{ product_id: adult.id, qty: 1 }] });
+  const fin2 = await cashier('POST', `/api/pos/orders/${o2.data.order.id}/finalize`, {
+    payments: [{ method: 'card_sim', amount_cents: o2.data.order.total_cents }],
+  });
+  const days =
+    (Date.parse(fin2.data.tickets[0].valid_to) - Date.now()) / (24 * 3600 * 1000);
+  assert.ok(days > 1.9 && days < 2.1, `expected the 2-day window, got ${days}`);
+});
+
+test('pos: manager approvals are throttled on failures only', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const cashier = client(base);
+  await cashier('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+  const adult = db.prepare("SELECT * FROM products WHERE sku = 'ADULT'").get();
+  const approver = { username: 'manager', password: 'manager' };
+
+  // a manager clearing a long queue must not run out of approvals mid-shift
+  const statuses = [];
+  for (let i = 0; i < 25; i++) {
+    const o = await cashier('POST', '/api/pos/orders', { lines: [{ product_id: adult.id, qty: 1 }] });
+    const r = await cashier('POST', `/api/pos/orders/${o.data.order.id}/void`, { approver });
+    statuses.push(r.status);
+  }
+  assert.deepEqual(statuses, Array(25).fill(200), 'successful approvals cost no budget');
+
+  // …while wrong credentials still burn it: 20 failures, then the door shuts
+  const fails = [];
+  for (let i = 0; i < 21; i++) {
+    const o = await cashier('POST', '/api/pos/orders', { lines: [{ product_id: adult.id, qty: 1 }] });
+    const r = await cashier('POST', `/api/pos/orders/${o.data.order.id}/void`, {
+      approver: { username: `ghost-${i}`, password: 'nope' },
+    });
+    fails.push(r.status);
+  }
+  assert.deepEqual(fails.slice(0, 20), Array(20).fill(403));
+  assert.equal(fails[20], 429);
+});
+
+test('pos: approval audit records the real client ip behind a trusted proxy', async (t) => {
+  const dbPath = tempDb();
+  const { server, db } = createApp(dbPath, {
+    env: { ...process.env, OWLPOS_TRUST_PROXY: '1' },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const login = await fetch(base + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': '203.0.113.77' },
+    body: JSON.stringify({ username: 'cashier', password: 'cashier' }),
+  });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+
+  const res = await fetch(base + '/api/pos/orders/999999/void', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie, 'x-forwarded-for': '203.0.113.77' },
+    body: JSON.stringify({ approver: { username: 'manager', password: 'wrong' } }),
+  });
+  assert.equal(res.status, 403);
+  const row = db
+    .prepare("SELECT detail FROM audit_log WHERE action = 'auth.login_failed' ORDER BY id DESC LIMIT 1")
+    .get();
+  assert.equal(JSON.parse(row.detail).ip, '203.0.113.77', 'not the proxy address');
 });
