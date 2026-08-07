@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
+const { logError } = require('./log');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -89,7 +90,7 @@ class Router {
           if (err instanceof ApiError) {
             sendJSON(res, err.status, { error: err.code, message: err.message });
           } else {
-            console.error(`[api] ${req.method} ${pathname}:`, err);
+            logError('api.error', err, { method: req.method, path: pathname });
             sendJSON(res, 500, { error: 'internal', message: 'Internal error' });
           }
         }
