@@ -251,6 +251,22 @@ async function main() {
   ok((await mgr2('GET', '/api/auth/me')).status === 401, 'the other manager session is dead after revoke');
   ok((await manager('GET', '/api/auth/me')).status === 200, 'the revoking session continues on its fresh cookie');
 
+  console.log('— backups —');
+  const bkRun = await admin('POST', '/api/backups/run', {});
+  ok(bkRun.status === 200 && bkRun.data.backup.bytes > 0, 'admin backup runs');
+  const { DatabaseSync } = require('node:sqlite');
+  const snap = new DatabaseSync(path.join(dir, 'backups', bkRun.data.backup.file), { readOnly: true });
+  ok(snap.prepare('PRAGMA integrity_check').get().integrity_check === 'ok', 'snapshot passes integrity_check');
+  const snapPay = snap.prepare('SELECT COALESCE(SUM(amount_cents - change_cents),0) AS s FROM payments').get().s;
+  const snapPaid = snap.prepare("SELECT COALESCE(SUM(total_cents),0) AS s FROM orders WHERE status='paid'").get().s;
+  ok(snapPay === snapPaid, 'snapshot payments reconcile with its own paid orders');
+  snap.close();
+  const bkList = await admin('GET', '/api/backups');
+  ok(bkList.data.backups.some((b) => b.name === bkRun.data.backup.file), 'snapshot listed');
+  const anonHealth = await anon('GET', '/api/health');
+  ok(!('disk_free_bytes' in anonHealth.data) && !('last_backup_at' in anonHealth.data),
+    'anonymous health has no disk/backup fields');
+
   console.log(`\nSMOKE PASSED — ${passed} checks green.`);
   server.close();
 }
