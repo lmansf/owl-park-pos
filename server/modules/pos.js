@@ -29,11 +29,13 @@ function uniqueConfirmation(db, prefix) {
   throw new Error('could not allocate unique confirmation');
 }
 
-// order_lines has no member column, so explicit member info for membership lines is
-// encoded in the (human-readable) line description and parsed back at finalize:
+// Explicit member info for membership lines lives in structured columns:
+// order_lines.member_id (renewal target; stamped at finalize once posted) and
+// order_lines.member_intent (server-written JSON {"name","email"} for a new member).
+// memberSuffix only decorates the human-readable description —
 //   "Explorer Annual Membership (renewal #12)"
 //   "Explorer Annual Membership (for Pat Smith <pat@example.com>)"
-// Only kind='membership' lines are ever parsed.
+// — display text that is never parsed back.
 function memberSuffix(member) {
   if (!member) return '';
   if (member.member_id) return ` (renewal #${Number(member.member_id)})`;
@@ -43,11 +45,16 @@ function memberSuffix(member) {
   return ` (for ${name}${email ? ` <${email}>` : ''})`;
 }
 
-function parseMember(description) {
-  let m = description.match(/\(renewal #(\d+)\)\s*$/);
-  if (m) return { member_id: Number(m[1]) };
-  m = description.match(/\(for ([^<>()]*?)(?:\s*<([^<>()]*)>)?\)\s*$/);
-  if (m) return { name: m[1].trim(), email: (m[2] || '').trim() };
+// member_intent column -> {name, email} or null. Backfilled/legacy rows could hold
+// junk; a parse failure means "no intent" (falls back to the order email, as ever).
+function memberIntent(raw) {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    if (v && typeof v === 'object') {
+      return { name: String(v.name ?? ''), email: String(v.email ?? '') };
+    }
+  } catch { /* ignore */ }
   return null;
 }
 
@@ -123,12 +130,23 @@ function createOrder(db, ctx, payload, channel) {
     if (product.kind === 'membership' && raw?.member && typeof raw.member === 'object') {
       if (raw.member.member_id) {
         const mid = Number(raw.member.member_id);
-        if (!Number.isInteger(mid) || !db.prepare('SELECT 1 FROM members WHERE id = ?').get(mid)) {
+        const target = Number.isInteger(mid) && mid > 0
+          ? db.prepare('SELECT email FROM members WHERE id = ?').get(mid)
+          : null;
+        // Web checkout is anonymous: only allow renewing a member whose email matches
+        // the buyer's. Same error either way so member ids cannot be enumerated.
+        const buyerEmail = String(payload?.customer?.email || '').trim().toLowerCase();
+        if (
+          !target ||
+          (channel === 'web' && String(target.email).toLowerCase() !== buyerEmail)
+        ) {
           throw bad('bad_member', `No member ${raw.member.member_id}`);
         }
         member = { member_id: mid };
       } else {
-        member = { name: raw.member.name, email: raw.member.email };
+        const name = String(raw.member.name ?? '').trim().slice(0, 200);
+        const email = String(raw.member.email ?? '').trim().slice(0, 200);
+        member = name || email ? { name, email } : null;
       }
     }
     return { product, qty, sessionId, member, gross: qty * product.price_cents };
@@ -180,15 +198,20 @@ function createOrder(db, ctx, payload, channel) {
     const orderId = Number(info.lastInsertRowid);
     const ins = db.prepare(
       `INSERT INTO order_lines (order_id, product_id, description, qty, unit_price_cents,
-         discount_cents, tax_cents, line_total_cents, event_session_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         discount_cents, tax_cents, line_total_cents, event_session_id, member_id,
+         member_intent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const l of lines) {
       const desc =
         l.product.name + (l.product.kind === 'membership' ? memberSuffix(l.member) : '');
       ins.run(
         orderId, l.product.id, desc, l.qty, l.product.price_cents,
-        l.discount, l.tax, l.total, l.sessionId
+        l.discount, l.tax, l.total, l.sessionId,
+        l.member?.member_id ?? null,
+        l.member && !l.member.member_id
+          ? JSON.stringify({ name: l.member.name, email: l.member.email })
+          : null
       );
     }
     return getOrderDetail(db, orderId);
@@ -273,20 +296,24 @@ function finalizeOrder(db, ctx, orderId, payments) {
     }
 
     // --- memberships: create or renew via the membership module --------------
+    // Structured columns only; the line description is display text, never parsed.
     const members = [];
+    const stampMember = db.prepare('UPDATE order_lines SET member_id = ? WHERE id = ?');
     for (const l of lines) {
       if (l.kind !== 'membership') continue;
-      const parsed = parseMember(l.description) || {};
+      const intent = memberIntent(l.member_intent);
+      let member = null;
       for (let i = 0; i < l.qty; i++) {
-        members.push(
-          ctx.modules.membership.createOrRenewMember(db, {
-            program_id: l.membership_program_id,
-            member_id: parsed.member_id,
-            name: parsed.name || order.customer_name,
-            email: parsed.email !== undefined ? parsed.email : order.customer_email,
-          })
-        );
+        member = ctx.modules.membership.createOrRenewMember(db, {
+          program_id: l.membership_program_id,
+          member_id: l.member_id || undefined,
+          name: (intent && intent.name) || order.customer_name,
+          email: intent ? intent.email : order.customer_email,
+        });
+        members.push(member);
       }
+      // stamp the posted member so the line stays joinable (reports, guest view)
+      if (member && member.id !== l.member_id) stampMember.run(member.id, l.id);
     }
 
     // --- mark paid + payments + audit ----------------------------------------
