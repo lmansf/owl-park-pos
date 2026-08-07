@@ -317,6 +317,8 @@ test('reports: group rollups (sales, admissions, dashboard, CSV, security)', asy
   assert.equal((await manager.call('POST', '/api/auth/login', { username: 'manager', password: 'manager' })).status, 200);
   assert.equal((await cashier.call('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' })).status, 200);
   assert.equal((await gate.call('POST', '/api/auth/login', { username: 'gate', password: 'gate' })).status, 200);
+  // POS cash needs an open drawer session (drawer-sessions-zreports)
+  assert.equal((await cashier.call('POST', '/api/drawer/open', { float_cents: 20000 })).status, 200);
 
   const cat = (await cashier.call('GET', '/api/catalog/sellable?channel=pos')).data.products;
   const bySku = Object.fromEntries(cat.map((p) => [p.sku, p]));

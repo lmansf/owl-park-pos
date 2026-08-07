@@ -695,11 +695,13 @@ function exchangeTicket(db, ctx, ticketId, targetSessionId, userId, approverId) 
       holder_name: ticket.holder_name, exchanged_from: ticket.id,
     });
 
+    // no money moves on an exchange; the drawer id is audit context only
+    const drawer = ctx.modules.drawer.openSessionFor(db, userId ?? null);
     audit(db, userId ?? null, 'pos.ticket.exchange', {
       ticket_id: ticket.id, new_ticket_id: fresh.id,
       from_session: ticket.event_session_id, to_session: targetId,
       approved_by: approverId ?? null,
-      ...(refundDrawer ? { drawer_session_id: refundDrawer.id } : {}),
+      ...(drawer ? { drawer_session_id: drawer.id } : {}),
     });
     return {
       old_ticket: db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id),

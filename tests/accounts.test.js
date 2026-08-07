@@ -316,6 +316,7 @@ test('accounts: voucher tender journal — mapped, mixed with cash, then unmappe
   t.after(() => server.close());
   const admin = await login(base, 'admin');
   const cashier = await login(base, 'cashier');
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 50000 })).status, 200);
 
   const sellable = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
   const adult = sellable.find((p) => p.sku === 'ADULT');
