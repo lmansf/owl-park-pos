@@ -202,9 +202,9 @@ async function main() {
   ok(grouped.status === 200, 'grouped sales report loads');
   const gsec = grouped.data.sections[0];
   const dayTix = gsec.rows.find((r) => r.group === 'Day Tickets');
-  // 3 ADULT sold today: 2 in the (since refunded) POS order + 1 web — refunded
-  // orders still count on their paid day.
-  ok(dayTix && dayTix.units === 3 && dayTix.gross_cents === 3 * adult.price_cents,
+  // 4 ADULT sold today: 2 in the (since refunded) POS order + 1 web + 1 voucher —
+  // refunded orders still count on their paid day.
+  ok(dayTix && dayTix.units === 4 && dayTix.gross_cents === 4 * adult.price_cents,
     "'Day Tickets' group gross equals the day's ADULT gross");
   const ungrouped = gsec.rows.find((r) => r.group === 'Ungrouped');
   ok(ungrouped && ungrouped.units > 0, 'Ungrouped row absorbs products in no group (PLNTM, MEM-EXP)');
