@@ -8,6 +8,29 @@ const { audit, randomCode, verifyManagerCredential, createRateLimiter } = requir
 
 const SELL = ['cashier', 'manager', 'admin'];
 const DAY_MS = (24 * 3600 * 1000);
+const REF_MAX = 64; // refs land in DB rows and receipts — cap attacker-length input
+
+// Tender registry — adding a tender = adding an entry here (plus, optionally, a
+// default clearing mapping in accounts.js). finalizeOrder consumes the registry;
+// its invariants (single tx, only path to paid/tickets/capacity) are untouched.
+// `change: true` marks tenders that can hand change back (cash-like); only those
+// rows may ever carry a non-zero change_cents. `authorize` is a pure, simulated
+// hook (zero network at runtime): it receives (amount_cents, {ref}) and returns
+// the ref to store — the seam a real processor integration would fill.
+const TENDERS = [
+  { method: 'cash', label: 'Cash', change: true,
+    authorize: (amount, meta) => ({ ref: meta.ref }) },
+  { method: 'card_sim', label: 'Card', change: false,
+    authorize: (amount, meta) => ({ ref: meta.ref || 'AUTH-' + randomCode('', 6) }) },
+  { method: 'voucher', label: 'Voucher', change: false,
+    authorize: (amount, meta) => ({ ref: meta.ref || 'VOUCHER' }) },
+];
+const TENDER_BY_METHOD = new Map(TENDERS.map((t) => [t.method, t]));
+
+// Public view only — never expose the authorize hooks.
+function listTenders() {
+  return TENDERS.map(({ method, label, change }) => ({ method, label, change }));
+}
 
 function bad(code, message) {
   return new ApiError(400, code, message);
@@ -218,7 +241,7 @@ function createOrder(db, ctx, payload, channel) {
   });
 }
 
-// The shared posting path. payments = [{method:'cash'|'card_sim', amount_cents, ref?}].
+// The shared posting path. payments = [{method:<registry key>, amount_cents, ref?}].
 // One tx: tender check, capacity reserve per session line, ticket issuance, membership
 // create/renew, order -> paid, payments rows, audit. -> {order, tickets, members, change_cents}
 function finalizeOrder(db, ctx, orderId, payments) {
@@ -240,23 +263,27 @@ function finalizeOrder(db, ctx, orderId, payments) {
     // --- tender validation --------------------------------------------------
     const rawPays = Array.isArray(payments) ? payments : [];
     let sum = 0;
-    let cashSum = 0;
+    let changeableSum = 0; // total tendered in change-bearing tenders (cash-like)
     const pays = rawPays.map((p) => {
-      const method = p?.method;
-      if (method !== 'cash' && method !== 'card_sim') {
-        throw bad('bad_method', 'Payment method must be cash or card_sim');
+      // Exact registry lookup (Map keyed by string) — whitelists method before
+      // it ever reaches SQL; no prefix/case-insensitive matching.
+      const tender = TENDER_BY_METHOD.get(p?.method);
+      if (!tender) {
+        throw bad(
+          'bad_method',
+          `Payment method must be one of ${TENDERS.map((t) => t.method).join(', ')}`
+        );
       }
       const amount = Number(p?.amount_cents);
       if (!Number.isInteger(amount) || amount <= 0) {
         throw bad('bad_amount', 'amount_cents must be a positive integer');
       }
       sum += amount;
-      if (method === 'cash') cashSum += amount;
-      const ref =
-        method === 'card_sim'
-          ? String(p?.ref || '').trim() || 'AUTH-' + randomCode('', 6)
-          : String(p?.ref || '').trim();
-      return { method, amount, ref };
+      if (tender.change) changeableSum += amount;
+      const { ref } = tender.authorize(amount, {
+        ref: String(p?.ref || '').trim().slice(0, REF_MAX),
+      });
+      return { method: tender.method, change: tender.change, amount, ref };
     });
     if (sum < order.total_cents) {
       throw bad(
@@ -265,7 +292,7 @@ function finalizeOrder(db, ctx, orderId, payments) {
       );
     }
     const change = sum - order.total_cents;
-    if (change > cashSum) {
+    if (change > changeableSum) {
       throw bad('bad_tender', 'Change cannot exceed cash tendered — reduce the card amount');
     }
 
@@ -322,14 +349,16 @@ function finalizeOrder(db, ctx, orderId, payments) {
     db.prepare("UPDATE orders SET status = 'paid', paid_at = ?, confirmation = ? WHERE id = ?")
       .run(at, confirmation, orderId);
 
-    let lastCashIdx = -1;
-    pays.forEach((p, i) => { if (p.method === 'cash') lastCashIdx = i; });
+    // Change is attributed to the LAST change-bearing payment row so
+    // SUM(amount_cents - change_cents) per order equals total_cents.
+    let lastChangeIdx = -1;
+    pays.forEach((p, i) => { if (p.change) lastChangeIdx = i; });
     const insPay = db.prepare(
       `INSERT INTO payments (order_id, method, amount_cents, change_cents, ref, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`
     );
     pays.forEach((p, i) =>
-      insPay.run(orderId, p.method, p.amount, i === lastCashIdx ? change : 0, p.ref, at)
+      insPay.run(orderId, p.method, p.amount, i === lastChangeIdx ? change : 0, p.ref, at)
     );
 
     const detail = getOrderDetail(db, orderId);
@@ -432,6 +461,10 @@ function mount(router, ctx) {
     return { order };
   });
 
+  // Tender registry for the POS tender dialog. SELL only (never public, never
+  // gate): it reveals back-office tender config the gate role has no use for.
+  router.get('/api/pos/tenders', SELL, () => ({ tenders: listTenders() }));
+
   router.post('/api/pos/orders/:id/finalize', SELL, (req) =>
     finalizeOrder(db, ctx, Number(req.params.id), req.body?.payments)
   );
@@ -464,4 +497,4 @@ function mount(router, ctx) {
   });
 }
 
-module.exports = { mount, createOrder, finalizeOrder, refundOrder };
+module.exports = { mount, createOrder, finalizeOrder, refundOrder, listTenders };
