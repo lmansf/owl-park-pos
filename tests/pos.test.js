@@ -47,6 +47,8 @@ test('pos: pricing, posting path, tenders, void/refund', async (t) => {
   await cashier('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
   const mgr = client(base);
   await mgr('POST', '/api/auth/login', { username: 'manager', password: 'manager' });
+  // POS cash needs an open drawer session (drawer-sessions-zreports)
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 20000 })).status, 200);
 
   // seed lookups
   const { data: sell } = await cashier('GET', '/api/catalog/sellable?channel=pos');
@@ -839,7 +841,7 @@ test('pos: member-order-lines migration backfills legacy descriptions', async (t
   // Open-order upgrade path: a pre-migration open renewal finalizes with the new
   // code and still renews the right member (via the backfilled column).
   const result = ctx.modules.pos.finalizeOrder(db, ctx, 9010, [
-    { method: 'cash', amount_cents: 9900 },
+    { method: 'card_sim', amount_cents: 9900 }, // card: no drawer needed for this legacy order
   ]);
   assert.equal(result.members.length, 1);
   assert.equal(result.members[0].id, 507);

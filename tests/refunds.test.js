@@ -71,6 +71,7 @@ test('pos: partial refunds — money, tickets, capacity, status flow', async (t)
   const { server, db, base } = await startServer();
   t.after(() => server.close());
   const cashier = await login(base, 'cashier');
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 50000 })).status, 200);
   const mgr = await login(base, 'manager');
 
   const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
@@ -257,6 +258,7 @@ test('pos: refund validation battery — over-refund, IDOR, bad payloads', async
   const { server, db, base } = await startServer();
   t.after(() => server.close());
   const cashier = await login(base, 'cashier');
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 50000 })).status, 200);
   const mgr = await login(base, 'manager');
   const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
   const adult = sell.find((p) => p.sku === 'ADULT');
@@ -332,6 +334,7 @@ test('pos: cancelled-session tickets stay refundable per line', async (t) => {
   const { server, db, base } = await startServer();
   t.after(() => server.close());
   const cashier = await login(base, 'cashier');
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 50000 })).status, 200);
   const mgr = await login(base, 'manager');
   const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
   const adult = sell.find((p) => p.sku === 'ADULT');
@@ -405,6 +408,7 @@ test('pos: refund state guards + XSS round-trip', async (t) => {
   const { server, base } = await startServer();
   t.after(() => server.close());
   const cashier = await login(base, 'cashier');
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 50000 })).status, 200);
   const mgr = await login(base, 'manager');
   const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
   const adult = sell.find((p) => p.sku === 'ADULT');
@@ -439,6 +443,7 @@ test('pos: session exchange — capacity-guarded void + reissue', async (t) => {
   const { server, db, base, ctx } = await startServer();
   t.after(() => server.close());
   const cashier = await login(base, 'cashier');
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 50000 })).status, 200);
   const mgr = await login(base, 'manager');
   const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
   const adult = sell.find((p) => p.sku === 'ADULT');
@@ -603,6 +608,7 @@ test('pos: refund/exchange authz — anon 401, gate 403, approver required', asy
   const { server, base } = await startServer();
   t.after(() => server.close());
   const cashier = await login(base, 'cashier');
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 50000 })).status, 200);
   const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
   const plntm = sell.find((p) => p.sku === 'PLNTM');
   const sessions = (await (await fetch(base + `/api/events/${plntm.event_id}/sessions`)).json()).sessions;
@@ -659,6 +665,7 @@ test('reporting: partial refunds and exchanges keep reports and the journal hone
   const { server, db, base } = await startServer();
   t.after(() => server.close());
   const cashier = await login(base, 'cashier');
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 50000 })).status, 200);
   const mgr = await login(base, 'manager');
   const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
   const adult = sell.find((p) => p.sku === 'ADULT');

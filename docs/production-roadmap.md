@@ -75,9 +75,11 @@ Explicitly out of scope in the demo; an SMB needs:
 
 - Multiple POS stations on a LAN against one server (works today in principle;
   named terminal identity with per-terminal menus already ships via the
-  `per-terminal-menus` change; still open: per-station cash-drawer sessions —
-  open float, paid-in/out, blind close, over/short reporting).
-- Shift management and Z-reports per drawer/day.
+  `per-terminal-menus` change; per-station cash-drawer sessions ship via
+  `drawer-sessions-zreports` — open float, paid-in/out, blind close, over/short,
+  and a drawers reconciliation report).
+- Shift management and Z-reports per drawer/day. (shipped: `drawer-sessions-zreports`
+  — Z per drawer session; shift scheduling still open)
 - Offline tolerance at the gate: cached ticket-validity window for network blips
   (bounded, reconciled on reconnect) — a real design problem, spec it before building.
 - Time-zone correctness: day boundaries are server-local everywhere; pin the venue

@@ -54,6 +54,7 @@
     { id: 'product-mix', label: 'Product mix' },
     { id: 'admissions', label: 'Admissions', groupable: true },
     { id: 'memberships', label: 'Memberships' },
+    { id: 'drawers', label: 'Drawer sessions' },
   ];
   let tab = 'sales';
   const groupable = () => Boolean(TABS.find((t) => t.id === tab)?.groupable);
@@ -99,7 +100,8 @@
     return String(v);
   }
   const isNum = (col) => /_cents$|_pct$/.test(col) ||
-    !['date', 'channel', 'product', 'sku', 'kind', 'gate', 'program', 'group'].includes(col);
+    !['date', 'channel', 'product', 'sku', 'kind', 'gate', 'program', 'group',
+      'cashier', 'terminal', 'item'].includes(col);
 
   function renderSection(s) {
     const head = s.columns.map((c) =>

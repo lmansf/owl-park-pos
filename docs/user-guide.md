@@ -55,6 +55,14 @@ same event with seats left; the old stub voids and a replacement prints. Every v
 refund, and exchange asks a manager or admin to type their own credentials as
 approval — the audit log records both people.
 
+**Cash drawer**: the Drawer button (top right) manages your cash-drawer session. Taking
+cash requires one — count your opening float and open the drawer first (if you forget,
+the failed sale opens the dialog for you). Record paid-ins/paid-outs with a reason as
+they happen. At end of shift, count the till and **blind close**: you enter the counted
+total without seeing the expected amount; the printable Z-report then shows expected,
+counted, and over/short. Managers can force-close an abandoned drawer from the API and
+see every session under Reports → Drawer sessions.
+
 ### Admissions (`/admissions.html`)
 The gate. The big input is keyboard-wedge friendly: scan or type a ticket (`T-…`) or
 member pass (`M-…`) code and press Enter — a full-panel green OK or red DENIED result
@@ -123,10 +131,12 @@ renewing memberships happens at POS or in the web store; renewals extend the sam
 record.
 
 ### Reports (`/reports.html`)
-Four date-ranged reports, each with a totals row and CSV download: **Sales summary** (by
+Five date-ranged reports, each with a totals row and CSV download: **Sales summary** (by
 day and channel; net = gross − discounts), **Product mix**, **Admissions** (scans, admits,
 denials by reason, per gate), **Memberships** (sold/renewed, active, upcoming
-expirations). Sales summary and Admissions also offer a **Group by: item group** toggle:
+expirations), **Drawer sessions** (closed drawers by day: float, cash, paid in/out,
+expected vs counted, over/short — plus an "Unattributed POS cash" line that should stay
+at zero). Sales summary and Admissions also offer a **Group by: item group** toggle:
 totals roll up per group, products in no group land under **Ungrouped**, and products in
 multiple groups count in each group — the report footer discloses that group totals can
 therefore exceed the grand total. Member and unknown-code scans carry no product, so the
