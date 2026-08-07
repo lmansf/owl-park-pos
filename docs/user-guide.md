@@ -32,7 +32,12 @@ differ on days with refunds. Auto-refreshes every minute.
 ### POS (`/pos.html`)
 The selling screen. Left side: your **designed menu pages** (from the Menu builder) as
 tabs of buttons — or, if no menu is configured, an automatic grid of all sellable items
-grouped by kind. Tap items to add to the cart; event-linked items (Planetarium) open a
+grouped by kind. A **terminal chip** at the top right shows which named terminal this
+register has claimed (or "Default menu"); managers and admins click it to claim or
+switch terminals, and the register then shows only that terminal's assigned menu pages
+(see the Menus page below). The claim is remembered per browser, is purely a menu-layout
+choice — prices and permissions never change with it — and cashiers see the claimed name
+read-only. Tap items to add to the cart; event-linked items (Planetarium) open a
 session picker showing remaining seats. Right side: the cart — quantities, discount code
 box, running totals (on phone-width screens the menu stacks above the cart). **Tender** opens the payment modal with one row per configured
 tender — cash (quick-bill buttons, change calculated), simulated card, and a demo
@@ -83,7 +88,11 @@ session (manager) voids its tickets.
 The POS screen designer. Create pages, then place buttons by position: **product buttons**
 (custom label, color, size) or **page links** for navigation. "Generate from group" fills
 a page from an item group. POS picks the design up immediately; deactivate all pages to
-fall back to the automatic grid.
+fall back to the automatic grid. The **Terminals** panel manages named registers
+("Front Gate", "Café"…): create, rename, or deactivate a terminal and tick the pages
+assigned to it. A POS register that claims a terminal shows only its assigned (and
+active) pages; terminals with no assignment — and registers with no claim — show the
+default menu, so an empty registry changes nothing.
 
 ### Store Builder (`/store-builder.html`)
 The guest store's landing-page editor: hero title/subtitle/accent color, then ordered

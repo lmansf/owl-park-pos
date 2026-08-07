@@ -291,6 +291,28 @@ async function main() {
   ok(activeMenu.pages.length === 1 && activeMenu.pages[0].buttons[0].product?.name === adult.name,
     'designed menu serves product button to POS');
 
+  console.log('— per-terminal menus: claim Café, sell from its menu —');
+  const childProd = sellable.find((p) => p.sku === 'CHILD');
+  const cafeTerm = (await admin('POST', '/api/menus/terminals', { name: 'Café' })).data.terminal;
+  const foodPage = (await admin('POST', '/api/menus/pages', { name: 'Café Food', sort: 2 })).data.page;
+  await admin('POST', `/api/menus/pages/${foodPage.id}/buttons`, { product_id: childProd.id, position: 1 });
+  const assign = await admin('PUT', `/api/menus/terminals/${cafeTerm.id}/pages`, { page_ids: [foodPage.id] });
+  ok(assign.status === 200, 'admin creates terminal Café and assigns it the food page');
+  const cafeMenu = (await cashier('GET', `/api/menus/active?terminal=${cafeTerm.id}`)).data;
+  ok(cafeMenu.pages.length === 1 && cafeMenu.pages[0].name === 'Café Food',
+    'claimed terminal is served only its assigned page');
+  const unclaimedMenu = (await cashier('GET', '/api/menus/active')).data;
+  ok(unclaimedMenu.pages.length === 2, 'unclaimed POS still sees the full active menu');
+  ok((await cashier('POST', '/api/menus/terminals', { name: 'Rogue' })).status === 403,
+    'cashier cannot manage terminals');
+  const cafeBtn = cafeMenu.pages[0].buttons[0];
+  const cafeOrder = (await cashier('POST', '/api/pos/orders',
+    { lines: [{ product_id: cafeBtn.product_id, qty: 1 }] })).data.order;
+  const cafeFin = await cashier('POST', `/api/pos/orders/${cafeOrder.id}/finalize`,
+    { payments: [{ method: 'card_sim', amount_cents: cafeOrder.total_cents }] });
+  ok(cafeFin.status === 200 && cafeFin.data.order.status === 'paid',
+    'sale off a terminal-menu button finalizes through the normal chokepoint');
+
   await admin('PUT', '/api/storefront/settings', { hero_title: 'Welcome to Owl Park' });
   await admin('POST', '/api/storefront/sections', { title: 'Day Tickets', kind: 'groups', config: { group_id: grp.id } });
   const layout = (await anon('GET', '/api/store/layout')).data;

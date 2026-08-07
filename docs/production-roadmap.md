@@ -74,8 +74,9 @@ Explicitly out of scope in the demo; an SMB needs:
 ## 5. Multi-terminal and venue realities
 
 - Multiple POS stations on a LAN against one server (works today in principle;
-  needs per-terminal identity — proposed: `per-terminal-menus` — plus per-station
-  cash-drawer sessions: open float, paid-in/out, blind close, over/short reporting).
+  named terminal identity with per-terminal menus already ships via the
+  `per-terminal-menus` change; still open: per-station cash-drawer sessions —
+  open float, paid-in/out, blind close, over/short reporting).
 - Shift management and Z-reports per drawer/day.
 - Offline tolerance at the gate: cached ticket-validity window for network blips
   (bounded, reconciled on reconnect) — a real design problem, spec it before building.
@@ -114,6 +115,7 @@ Explicitly out of scope in the demo; an SMB needs:
 2. Semi-integrated card terminal (§2), filling the shipped `pluggable-tenders`
    registry's `authorize` seam.
 3. Hardware: printer + scanner + drawer (§4).
-4. Drawer sessions/Z-reports + `per-terminal-menus` (§5).
+4. Drawer sessions/Z-reports (§5; builds on the shipped `per-terminal-menus`
+   terminal identity).
 5. Tax/receipt compliance for the venue's jurisdiction (§6).
 6. Web store production checklist (§6) last — the on-site loop earns money first.
