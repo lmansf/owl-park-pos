@@ -385,6 +385,48 @@ function membershipsReport(db, rng) {
 
 // ---------- drawer sessions ----------
 
+// Still-open drawer sessions. Their cash is invisible everywhere else: they have
+// no closed-session row, and their payments are NOT unattributed either (they
+// carry a drawer_session_id), so a till a cashier walked away from would drop out
+// of reconciliation entirely. Listed regardless of the report range — an
+// abandoned drawer is unreconciled TODAY whatever day it was opened on.
+//
+// Deliberately NO cash sums here. Whoever counts an abandoned till (a manager
+// force-closing it) must not be told the expected total first or over/short stops
+// being a control — same blind-close discipline /api/drawer/current follows. Float,
+// payment count and age are exactly what the manager session list already exposes.
+function openDrawerSection(db) {
+  const columns = ['date', 'session_id', 'cashier', 'terminal', 'float_cents', 'payments', 'hours_open'];
+  const rows = db.prepare(
+    `SELECT date(ds.opened_at, 'localtime') AS date, ds.id AS session_id,
+            u.display_name AS cashier, ds.terminal,
+            ds.open_float_cents AS float_cents,
+            (SELECT COUNT(*) FROM payments p WHERE p.drawer_session_id = ds.id) AS payments,
+            ROUND((julianday('now') - julianday(ds.opened_at)) * 24, 1) AS hours_open
+     FROM drawer_sessions ds JOIN users u ON u.id = ds.opened_by
+     WHERE ds.status = 'open'
+     ORDER BY ds.opened_at`
+  ).all();
+  if (!rows.length) return null;
+  const totals = {};
+  for (const c of columns) totals[c] = '';
+  totals.date = 'TOTAL';
+  totals.float_cents = rows.reduce((a, r) => a + r.float_cents, 0);
+  totals.payments = rows.reduce((a, r) => a + r.payments, 0);
+  return {
+    title: 'OPEN drawer sessions — cash still in the till',
+    columns,
+    rows,
+    totals,
+    note:
+      `${rows.length} drawer session(s) are still open (listed whatever the date range): ` +
+      'the float above plus everything taken since is in a till and is NOT counted in the ' +
+      'sections below. Close each one — the cashier from the POS drawer panel, or a manager ' +
+      'who has counted the till via POST /api/drawer/sessions/<session_id>/close — then re-run ' +
+      'this report. Expected cash is withheld here on purpose so the count stays blind.',
+  };
+}
+
 // Closed drawer sessions in range (bucketed by local close day) plus an
 // "Unattributed POS cash" cross-check: cash payments on pos-channel orders with
 // no drawer_session_id. With enforcement live that line should be 0 — anything
@@ -423,13 +465,15 @@ function drawersReport(db, rng) {
   const unColumns = ['item', 'payments', 'amount_cents'];
   const unRows = [{ item: 'Unattributed POS cash', payments: un.payments, amount_cents: un.amount_cents }];
 
-  return {
-    range: { from: rng.from, to: rng.to },
-    sections: [
-      { title: 'Closed drawer sessions', columns, rows, totals },
-      { title: 'Unattributed POS cash', columns: unColumns, rows: unRows },
-    ],
-  };
+  const sections = [
+    { title: 'Closed drawer sessions', columns, rows, totals },
+    { title: 'Unattributed POS cash', columns: unColumns, rows: unRows },
+  ];
+  // Unreconciled money leads: a manager must see it before the day's numbers.
+  const open = openDrawerSection(db);
+  if (open) sections.unshift(open);
+
+  return { range: { from: rng.from, to: rng.to }, sections };
 }
 
 // ---------- dashboard ----------

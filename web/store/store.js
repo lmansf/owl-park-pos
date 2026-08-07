@@ -141,15 +141,24 @@
     }
 
     for (const m of order.members) {
+      // A renewal carries no pass code on purpose: the gate credential is only shown
+      // for a member THIS order minted (the order email is unverified). Print the
+      // acknowledgement then — never a barcode slot, which would render as an empty
+      // "**" code that scans as nothing and gets the holder turned away at the gate.
+      const renewal = Boolean(m.renewal) || !m.pass_code;
       parts.push(`
         <article class="st-ticket">
-          <div class="venue">Owl Park · membership pass</div>
+          <div class="venue">Owl Park · membership ${renewal ? 'renewal' : 'pass'}</div>
           <h3>${esc(m.name)}</h3>
           <div class="meta">
             <div>Member no: ${esc(m.member_no)}</div>
             <div>Valid through ${esc(new Date(m.expires_at).toLocaleDateString())}</div>
           </div>
-          <div class="bc" data-code="${esc(m.pass_code)}"></div>
+          ${renewal
+            ? `<p class="st-muted">Renewed — keep using your existing membership pass; it
+                 stays valid through the date above. Mislaid it? Guest services can
+                 reprint it at the park.</p>`
+            : `<div class="bc" data-code="${esc(m.pass_code)}"></div>`}
         </article>`);
     }
 
