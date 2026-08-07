@@ -3,7 +3,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { openDb, migrate } = require('./core/db');
-const { Router } = require('./core/http');
+const { Router, ApiError } = require('./core/http');
 const auth = require('./core/auth');
 const { seed } = require('./core/seed');
 
@@ -11,22 +11,39 @@ const ROOT = path.join(__dirname, '..');
 const PORT = Number(process.env.OWLPOS_PORT || 4650);
 const DB_PATH = process.env.OWLPOS_DB || path.join(ROOT, 'data', 'owlpark-pos.db');
 
-function createApp(dbPath = DB_PATH) {
+// While a production-mode user must change their password, only these routes work.
+const PW_CHANGE_ALLOWED = new Set([
+  '/api/auth/change-password', '/api/auth/logout', '/api/auth/me',
+]);
+
+function createApp(dbPath = DB_PATH, opts = {}) {
+  const env = opts.env || process.env;
+  // Fail-closed: in production mode this throws (no OWLPOS_SECRET, too short)
+  // before anything listens. Demo mode keeps the per-process random fallback.
+  const config = auth.resolveConfig(env);
   const db = openDb(dbPath);
   migrate(db, path.join(__dirname, 'migrations'));
   if (seed(db)) console.log('[seed] demo data created');
 
   const router = new Router({
     webRoot: path.join(ROOT, 'web'),
-    resolveUser: auth.resolveUser(db),
+    resolveUser: auth.resolveUser(db, config),
+    guard: (req, pathname) => {
+      if (config.mode !== 'production') return; // demo keeps today's behavior exactly
+      if (req.user?.must_change_password && !PW_CHANGE_ALLOWED.has(pathname)) {
+        throw new ApiError(403, 'password_change_required', 'Set a new password to continue');
+      }
+    },
   });
-  auth.mount(router, db);
+  auth.mount(router, db, config);
 
   // Deployment self-description: hosted demos (Vercel) run with an ephemeral
   // /tmp database that reseeds on cold start; the UI shows a banner when so.
+  // mode lets the login page hide the demo-credentials hint in production.
   router.get('/api/health', null, () => ({
     ok: true,
-    ephemeral: Boolean(process.env.VERCEL),
+    ephemeral: Boolean(env.VERCEL),
+    mode: config.mode,
   }));
 
   // Auto-mount every module in server/modules/ (each exports mount(router, ctx))

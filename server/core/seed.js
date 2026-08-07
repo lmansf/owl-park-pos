@@ -16,8 +16,10 @@ function seed(db) {
       ['cashier', 'cashier', 'Casey Cashier'],
       ['gate', 'gate', 'Gabi Gate'],
     ]) {
+      // Well-known demo passwords: flagged for forced rotation, enforced only
+      // when the server runs in production mode.
       db.prepare(
-        'INSERT INTO users (username, pass_hash, display_name, role) VALUES (?, ?, ?, ?)'
+        'INSERT INTO users (username, pass_hash, display_name, role, must_change_password) VALUES (?, ?, ?, ?, 1)'
       ).run(username, hashPassword(username), name, role);
     }
 

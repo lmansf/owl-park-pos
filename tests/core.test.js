@@ -12,12 +12,15 @@ function tempDb() {
   return path.join(dir, 'test.db');
 }
 
-async function startServer() {
-  const { server, db } = createApp(tempDb());
+async function startServer(opts) {
+  const { server, db } = createApp(tempDb(), opts);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   return { server, db, base };
 }
+
+// production-mode apps need an explicit strong secret (fail-closed)
+const PROD_ENV = { OWLPOS_MODE: 'production', OWLPOS_SECRET: 'ab'.repeat(32) };
 
 // minimal cookie-carrying client
 function client(base) {
@@ -69,6 +72,191 @@ test('core: boot, migrate, seed, auth, roles', async (t) => {
     assert.equal(res.status, 200);
     assert.match(await res.text(), /OWL PARK/);
   });
+});
+
+test('core: login lockout — 5 failures lock the account, unlock restores it', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const c = client(base);
+
+  for (let i = 0; i < 5; i++) {
+    const r = await c('POST', '/api/auth/login', { username: 'cashier', password: 'nope' });
+    assert.equal(r.status, 401);
+    assert.deepEqual(r.data, { error: 'bad_credentials', message: 'Wrong username or password' });
+  }
+  assert.ok(db.prepare("SELECT locked_until FROM users WHERE username = 'cashier'").get().locked_until);
+
+  // the correct password is still rejected while locked — with the same generic body
+  const locked = await c('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+  assert.equal(locked.status, 401);
+  assert.deepEqual(locked.data, { error: 'bad_credentials', message: 'Wrong username or password' });
+
+  // every failure path is audit-visible
+  const failed = db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action = 'auth.login_failed'").get().n;
+  assert.ok(failed >= 5, `expected >= 5 auth.login_failed rows, got ${failed}`);
+  assert.ok(db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action = 'auth.login_locked'").get().n >= 1);
+
+  // lock expiry (simulated by clearing) → login succeeds and counters reset
+  db.prepare("UPDATE users SET locked_until = NULL WHERE username = 'cashier'").run();
+  const ok = await c('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+  assert.equal(ok.status, 200);
+  const row = db.prepare("SELECT failed_logins, locked_until FROM users WHERE username = 'cashier'").get();
+  assert.equal(row.failed_logins, 0);
+  assert.equal(row.locked_until, null);
+});
+
+test('core: uniform login failure + per-IP rate limit', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+  const c = client(base);
+
+  // unknown username and wrong password are indistinguishable
+  const unknown = await c('POST', '/api/auth/login', { username: 'no-such-user', password: 'x' });
+  const wrong = await c('POST', '/api/auth/login', { username: 'admin', password: 'x' });
+  assert.equal(unknown.status, 401);
+  assert.equal(wrong.status, 401);
+  assert.deepEqual(unknown.data, wrong.data);
+
+  // burst past the per-IP window → 429s appear, with a generic body + Retry-After
+  let got429 = null;
+  for (let i = 0; i < 25; i++) {
+    const res = await fetch(base + '/api/auth/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'x' }),
+    });
+    if (res.status === 429) { got429 = res; break; }
+  }
+  assert.ok(got429, 'expected a 429 within 25 rapid attempts');
+  assert.ok(Number(got429.headers.get('retry-after')) > 0);
+  assert.equal((await got429.json()).error, 'too_many_attempts');
+});
+
+test('core: change-password — policy, epoch bump, fresh cookie', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+  const a = client(base);
+  const b = client(base); // second session on the same account
+  await a('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+  await b('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+
+  // policy: too short / equal to current / wrong current password
+  let r = await a('POST', '/api/auth/change-password', { current_password: 'cashier', new_password: 'short' });
+  assert.equal(r.status, 400);
+  assert.equal(r.data.error, 'weak_password');
+  r = await a('POST', '/api/auth/change-password', { current_password: 'cashier', new_password: 42 });
+  assert.equal(r.status, 400);
+  r = await a('POST', '/api/auth/change-password', { current_password: 'wrong', new_password: 'longenough' });
+  assert.equal(r.status, 403);
+  assert.equal(r.data.error, 'bad_current_password');
+
+  // success: old password dead, new one works, other session revoked, own cookie re-issued
+  r = await a('POST', '/api/auth/change-password', { current_password: 'cashier', new_password: 'brand-new-pass' });
+  assert.equal(r.status, 200);
+  assert.equal((await a('GET', '/api/auth/me')).status, 200); // fresh cookie from the response
+  assert.equal((await b('GET', '/api/auth/me')).status, 401); // pre-change cookie is dead
+  assert.equal((await b('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' })).status, 401);
+  assert.equal((await b('POST', '/api/auth/login', { username: 'cashier', password: 'brand-new-pass' })).status, 200);
+
+  // new === current is rejected
+  r = await a('POST', '/api/auth/change-password', { current_password: 'brand-new-pass', new_password: 'brand-new-pass' });
+  assert.equal(r.status, 400);
+  assert.equal(r.data.error, 'weak_password');
+});
+
+test('core: session revocation via token epoch', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+  const a = client(base);
+  const b = client(base);
+  await a('POST', '/api/auth/login', { username: 'manager', password: 'manager' });
+  await b('POST', '/api/auth/login', { username: 'manager', password: 'manager' });
+
+  const r = await a('POST', '/api/auth/revoke-sessions', {});
+  assert.equal(r.status, 200);
+  assert.equal((await b('GET', '/api/auth/me')).status, 401); // other session dead immediately
+  assert.equal((await a('GET', '/api/auth/me')).status, 200); // self kept a fresh cookie
+
+  // targeting another user requires admin
+  const cashier = client(base);
+  await cashier('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+  const deny = await cashier('POST', '/api/auth/revoke-sessions', { user_id: 1 });
+  assert.equal(deny.status, 403);
+  const admin = client(base);
+  await admin('POST', '/api/auth/login', { username: 'admin', password: 'admin' });
+  const missing = await admin('POST', '/api/auth/revoke-sessions', { user_id: 999999 });
+  assert.equal(missing.status, 404);
+  const ok = await admin('POST', '/api/auth/revoke-sessions', {
+    user_id: (await cashier('GET', '/api/auth/me')).data.user.id,
+  });
+  assert.equal(ok.status, 200);
+  assert.equal((await cashier('GET', '/api/auth/me')).status, 401);
+});
+
+test('core: production mode — fail-closed secret, forced password change, cookie flags', async (t) => {
+  // fail-closed: no secret / short secret → createApp throws before listening
+  assert.throws(() => createApp(tempDb(), { env: { OWLPOS_MODE: 'production' } }), /OWLPOS_SECRET/);
+  assert.throws(
+    () => createApp(tempDb(), { env: { OWLPOS_MODE: 'production', OWLPOS_SECRET: 'tooshort' } }),
+    /OWLPOS_SECRET/
+  );
+
+  const { server, base } = await startServer({ env: PROD_ENV });
+  t.after(() => server.close());
+
+  // health reports the mode so the UI can hide demo hints
+  assert.equal((await (await fetch(base + '/api/health')).json()).mode, 'production');
+
+  // cookie hardening: Secure + SameSite=Strict + Max-Age matching the 12h expiry
+  const loginRes = await fetch(base + '/api/auth/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'admin' }),
+  });
+  assert.equal(loginRes.status, 200);
+  const setCookie = loginRes.headers.get('set-cookie');
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /Secure/);
+  assert.match(setCookie, /SameSite=Strict/);
+  assert.match(setCookie, /Max-Age=43200/);
+  assert.equal((await loginRes.json()).must_change_password, true);
+
+  // seeded account is fenced in: only me/logout/change-password respond
+  const cookie = setCookie.split(';')[0];
+  const authed = (method, p, body) => fetch(base + p, {
+    method, headers: { 'content-type': 'application/json', cookie },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const fenced = await authed('GET', '/api/pos/orders');
+  assert.equal(fenced.status, 403);
+  assert.equal((await fenced.json()).error, 'password_change_required');
+  assert.equal((await authed('GET', '/api/auth/me')).status, 200);
+
+  const change = await authed('POST', '/api/auth/change-password', {
+    current_password: 'admin', new_password: 'production-pass',
+  });
+  assert.equal(change.status, 200);
+  const freshCookie = change.headers.get('set-cookie').split(';')[0];
+  const after = await fetch(base + '/api/pos/orders', { headers: { cookie: freshCookie } });
+  assert.equal(after.status, 200); // fence lifts once the password is rotated
+});
+
+test('core: demo mode cookie stays HttpOnly but not Secure on plain http', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+  const res = await fetch(base + '/api/auth/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'gate', password: 'gate' }),
+  });
+  const setCookie = res.headers.get('set-cookie');
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /SameSite=Strict/);
+  assert.doesNotMatch(setCookie, /Secure/);
+  // demo mode never fences seeded accounts, even though the flag is set
+  const cookie = setCookie.split(';')[0];
+  const me = await fetch(base + '/api/auth/me', { headers: { cookie } });
+  assert.equal(me.status, 200);
+  assert.equal((await me.json()).must_change_password, true);
+  const scan = await fetch(base + '/api/admissions/recent', { headers: { cookie } });
+  assert.notEqual(scan.status, 403);
 });
 
 test('core: seed is idempotent across restarts', async () => {
