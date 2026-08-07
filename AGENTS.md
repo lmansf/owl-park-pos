@@ -3,7 +3,9 @@
 Owl Park Point of Sale: self-contained attractions ticketing suite for the fictional Owl
 Park. Simulated payments; auth is demo-grade in the default demo mode — never expose
 demo mode beyond localhost. `OWLPOS_MODE=production` hardens auth (fail-closed
-`OWLPOS_SECRET`, forced password change; spec: `openspec/specs/platform-core/spec.md`).
+`OWLPOS_SECRET` + `OWLPOS_BOOTSTRAP_ADMIN_PASSWORD`, no seeded demo credentials,
+forced password change, `tools/users.js` account admin; spec:
+`openspec/specs/platform-core/spec.md`).
 
 - Run: `node server/main.js` → back office http://localhost:4650 (admin/admin,
   manager/manager, cashier/cashier, gate/gate), guest store at /store/. DB is

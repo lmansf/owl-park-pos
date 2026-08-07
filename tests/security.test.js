@@ -22,8 +22,8 @@ function tempDb() {
   return path.join(dir, 'test.db');
 }
 
-async function startServer(opts) {
-  const { server, db } = createApp(tempDb(), opts);
+async function startServer(opts = {}) {
+  const { server, db } = createApp(opts.dbPath || tempDb(), opts);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   return { server, db, base };
@@ -47,7 +47,11 @@ function client(base) {
 }
 
 const SECRET = 'cd'.repeat(32);
-const PROD_ENV = { OWLPOS_MODE: 'production', OWLPOS_SECRET: SECRET };
+const BOOTSTRAP = 'operator-bootstrap-pass';
+const PROD_ENV = {
+  OWLPOS_MODE: 'production', OWLPOS_SECRET: SECRET,
+  OWLPOS_BOOTSTRAP_ADMIN_PASSWORD: BOOTSTRAP,
+};
 
 function sign(payload) {
   return `${payload}.${crypto.createHmac('sha256', SECRET).update(payload).digest('base64url')}`;
@@ -627,17 +631,33 @@ test('security: finalize audits the user who tendered, not the order builder', a
 });
 
 test('security: a fenced approver cannot approve in production mode', async (t) => {
-  const { server, db, base } = await startServer({ env: PROD_ENV });
+  // Half-rolled-out production deployment: the DB was seeded in demo mode, the
+  // operator rotated the passwords out-of-band (must_change_password still set —
+  // a live demo credential would refuse to start) and flipped on production.
+  const dbPath = tempDb();
+  {
+    const db0 = openDb(dbPath);
+    migrate(db0, MIGRATIONS);
+    seed(db0, {});
+    const rotate = db0.prepare('UPDATE users SET pass_hash = ? WHERE username = ?');
+    rotate.run(hashPassword('cashier-initial-1'), 'cashier');
+    rotate.run(hashPassword('manager-initial-1'), 'manager');
+    db0.prepare("UPDATE users SET active = 0 WHERE username IN ('admin', 'gate')").run();
+    db0.close();
+  }
+  const { server, db, base } = await startServer({ dbPath, env: PROD_ENV });
   t.after(() => server.close());
   const cashier = client(base);
   assert.equal(
-    (await cashier('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' })).status,
+    (await cashier('POST', '/api/auth/login', {
+      username: 'cashier', password: 'cashier-initial-1',
+    })).status,
     200
   );
   // the cashier rotates its own password, so only the approver is still fenced
   assert.equal(
     (await cashier('POST', '/api/auth/change-password', {
-      current_password: 'cashier', new_password: 'cashier-rotated-1',
+      current_password: 'cashier-initial-1', new_password: 'cashier-rotated-1',
     })).status,
     200
   );
@@ -653,7 +673,7 @@ test('security: a fenced approver cannot approve in production mode', async (t) 
   })).data.order;
 
   const attempt = await cashier('POST', `/api/pos/orders/${order.id}/void`, {
-    approver: { username: 'manager', password: 'manager' },
+    approver: { username: 'manager', password: 'manager-initial-1' },
   });
   assert.equal(attempt.status, 403);
   assert.equal(attempt.data.error, 'approval_required');
@@ -661,10 +681,12 @@ test('security: a fenced approver cannot approve in production mode', async (t) 
 
   // once the manager rotates, the same approval works
   const manager = client(base);
-  await manager('POST', '/api/auth/login', { username: 'manager', password: 'manager' });
+  await manager('POST', '/api/auth/login', {
+    username: 'manager', password: 'manager-initial-1',
+  });
   assert.equal(
     (await manager('POST', '/api/auth/change-password', {
-      current_password: 'manager', new_password: 'manager-rotated-1',
+      current_password: 'manager-initial-1', new_password: 'manager-rotated-1',
     })).status,
     200
   );
@@ -757,10 +779,28 @@ test('security: an open drawer’s cash is not readable back through the order A
     'no amount from the open session survives the read-back'
   );
 
+  // the refund response returns the same order detail — it must be just as blind
+  const refunded = await cashier('POST', `/api/pos/orders/${order.id}/refund`, {
+    approver: { username: 'manager', password: 'manager' },
+    lines: [{ order_line_id: order.lines[0].id, qty: 1 }],
+  });
+  assert.equal(refunded.status, 200);
+  assert.equal(refunded.data.order.payments_withheld, true);
+  assert.ok(
+    refunded.data.order.payments.every(
+      (p) => p.method === 'withheld' && p.amount_cents === null && p.change_cents === null
+    ),
+    'refund response re-serves no cash row for the open session'
+  );
+  assert.ok(
+    !JSON.stringify(refunded.data.order.payments).includes(String(order.total_cents + 500)),
+    'original tender amount never survives the refund response'
+  );
+
   // after close, the session's payments are readable again (Z reconciliation)
   assert.equal((await cashier('POST', '/api/drawer/close', { counted_cents: 1 })).status, 200);
   const afterClose = await cashier('GET', `/api/pos/orders/${order.id}`);
-  assert.equal(afterClose.data.order.payments.length, 1);
+  assert.equal(afterClose.data.order.payments.length, 2); // tender + the refund row
   assert.equal(afterClose.data.order.payments[0].amount_cents, order.total_cents + 500);
   assert.equal(
     db.prepare('SELECT drawer_session_id AS d FROM payments WHERE order_id = ?').get(order.id).d,

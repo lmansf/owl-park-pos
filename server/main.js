@@ -26,7 +26,7 @@ function createApp(dbPath = DB_PATH, opts = {}) {
   const config = auth.resolveConfig(env);
   const db = openDb(dbPath);
   migrate(db, path.join(__dirname, 'migrations'));
-  if (seed(db)) log('info', 'seed.created');
+  if (seed(db, env)) log('info', 'seed.created');
 
   const router = new Router({
     webRoot: path.join(ROOT, 'web'),

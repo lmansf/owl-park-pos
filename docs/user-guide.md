@@ -189,11 +189,19 @@ online show the printable pass card on the confirmation page.
   serverless function). The hosted database lives in `/tmp` and is intentionally
   ephemeral — a demo, not a system of record. Real payments and real hardware are out of
   scope by design.
-- **Production mode:** set `OWLPOS_MODE=production` and a strong `OWLPOS_SECRET`
-  (at least 32 bytes, e.g. 64 hex chars — the server refuses to start without one). In
-  this mode the seeded demo accounts must set a real password at first sign-in before
-  anything else works, session cookies are marked `Secure` (put the server behind
-  HTTPS), and the login page stops advertising demo credentials. In every mode, login is
+- **Production mode:** set `OWLPOS_MODE=production`, a strong `OWLPOS_SECRET`
+  (at least 32 bytes, e.g. 64 hex chars) and, when seeding a fresh database,
+  `OWLPOS_BOOTSTRAP_ADMIN_PASSWORD` (at least 12 chars) — the server refuses to start
+  without them. A production seed never creates a usable demo credential: `admin` takes
+  the bootstrap password (and must still choose their own at first sign-in), while
+  `manager`/`cashier`/`gate` are created disabled. Enable the ones you need with
+  `OWLPOS_USER_PASSWORD=<temp password> node tools/users.js activate <username>` (also
+  `list`, `deactivate`, `set-password`) — each activated account signs in with its
+  temporary password and must rotate it before anything else works. A database still
+  carrying an active demo password (from a demo-mode seed or a restored demo snapshot)
+  refuses to start in production until those accounts are rotated or deactivated.
+  Session cookies are marked `Secure` (put the server behind HTTPS), and the login page
+  stops advertising demo credentials. In every mode, login is
   rate-limited, five consecutive wrong passwords lock an account for 15 minutes (failed
   attempts land in the audit log), voids/refunds require a manager to enter their own
   credentials, and the Password button in the top bar changes your password — which also

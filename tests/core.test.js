@@ -19,8 +19,13 @@ async function startServer(opts) {
   return { server, db, base };
 }
 
-// production-mode apps need an explicit strong secret (fail-closed)
-const PROD_ENV = { OWLPOS_MODE: 'production', OWLPOS_SECRET: 'ab'.repeat(32) };
+// production-mode apps need an explicit strong secret and a bootstrap admin
+// password (both fail-closed)
+const BOOTSTRAP = 'operator-bootstrap-pass';
+const PROD_ENV = {
+  OWLPOS_MODE: 'production', OWLPOS_SECRET: 'ab'.repeat(32),
+  OWLPOS_BOOTSTRAP_ADMIN_PASSWORD: BOOTSTRAP,
+};
 
 // minimal cookie-carrying client
 function client(base) {
@@ -199,6 +204,14 @@ test('core: production mode — fail-closed secret, forced password change, cook
     () => createApp(tempDb(), { env: { OWLPOS_MODE: 'production', OWLPOS_SECRET: 'tooshort' } }),
     /OWLPOS_SECRET/
   );
+  // …and seeding resolves mode from the SAME env: a production app with no
+  // bootstrap admin password fails closed instead of seeding demo credentials
+  assert.throws(
+    () => createApp(tempDb(), {
+      env: { OWLPOS_MODE: 'production', OWLPOS_SECRET: 'ab'.repeat(32) },
+    }),
+    /OWLPOS_BOOTSTRAP_ADMIN_PASSWORD/
+  );
 
   const { server, base } = await startServer({ env: PROD_ENV });
   t.after(() => server.close());
@@ -206,10 +219,17 @@ test('core: production mode — fail-closed secret, forced password change, cook
   // health reports the mode so the UI can hide demo hints
   assert.equal((await (await fetch(base + '/api/health')).json()).mode, 'production');
 
+  // the demo credential does not exist in production — admin takes the bootstrap password
+  const demoLogin = await fetch(base + '/api/auth/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'admin' }),
+  });
+  assert.equal(demoLogin.status, 401);
+
   // cookie hardening: Secure + SameSite=Strict + Max-Age matching the 12h expiry
   const loginRes = await fetch(base + '/api/auth/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'admin' }),
+    body: JSON.stringify({ username: 'admin', password: BOOTSTRAP }),
   });
   assert.equal(loginRes.status, 200);
   const setCookie = loginRes.headers.get('set-cookie');
@@ -231,7 +251,7 @@ test('core: production mode — fail-closed secret, forced password change, cook
   assert.equal((await authed('GET', '/api/auth/me')).status, 200);
 
   const change = await authed('POST', '/api/auth/change-password', {
-    current_password: 'admin', new_password: 'production-pass',
+    current_password: BOOTSTRAP, new_password: 'production-pass',
   });
   assert.equal(change.status, 200);
   const freshCookie = change.headers.get('set-cookie').split(';')[0];

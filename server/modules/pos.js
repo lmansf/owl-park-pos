@@ -862,7 +862,9 @@ function mount(router, ctx) {
   // absent/empty lines array refunds everything still live.
   router.post('/api/pos/orders/:id/refund', SELL, (req, res) => {
     const approver = approveWith(req, res);
-    return refundOrder(db, ctx, Number(req.params.id), req.user.id, approver.id, req.body?.lines);
+    const result = refundOrder(db, ctx, Number(req.params.id), req.user.id, approver.id, req.body?.lines);
+    result.order = withholdOwnOpenDrawerCash(result.order, req.user.id);
+    return result;
   });
 
   // Exchange a valid timed-entry ticket to another session of the same event —
