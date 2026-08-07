@@ -78,6 +78,14 @@
     </div>`;
   }
 
+  // skeleton tiles while the first fetch is in flight — the page never sits blank
+  document.getElementById('kpis').innerHTML =
+    ['Revenue today', 'Orders', 'Tickets sold', 'Admits', 'Active members'].map((label, i) => `
+      <div class="kpi${i === 0 ? ' hero' : ''}">
+        <div class="label">${op.esc(label)}</div>
+        <div class="value"><span class="op-skel" style="min-width:60%">&nbsp;</span></div>
+      </div>`).join('');
+
   async function refresh() {
     let d;
     try { d = await op.api('/api/reports/dashboard'); } catch { return; }

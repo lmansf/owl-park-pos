@@ -31,13 +31,15 @@ window.op = (() => {
     const res = await fetch(path, init);
     let data = null;
     try { data = await res.json(); } catch { /* non-JSON (e.g. CSV) */ }
+    // same-origin relative path + search, so ?next= lands back on the exact view
+    const here = () => encodeURIComponent(location.pathname + location.search);
     if (res.status === 401 && !path.startsWith('/api/auth/login')) {
-      location.href = '/login.html?next=' + encodeURIComponent(location.pathname);
+      location.href = '/login.html?next=' + here();
       throw new Error('unauthenticated');
     }
     if (res.status === 403 && data?.error === 'password_change_required') {
       // production mode: seeded accounts must set a real password before working
-      location.href = '/login.html?pw=1&next=' + encodeURIComponent(location.pathname);
+      location.href = '/login.html?pw=1&next=' + here();
       throw new Error('password_change_required');
     }
     if (!res.ok) {
@@ -58,11 +60,32 @@ window.op = (() => {
       wrap.className = 'op-toast-wrap';
       document.body.appendChild(wrap);
     }
+    // collapse an identical still-visible message instead of stacking a twin
+    const last = wrap.lastElementChild;
+    if (last && last.textContent === msg && last.className === `op-toast ${kind}`) {
+      clearTimeout(last._t);
+      last._t = setTimeout(() => last.remove(), kind === 'err' ? 8000 : 5000);
+      return;
+    }
     const el = document.createElement('div');
     el.className = `op-toast ${kind}`;
     el.textContent = msg;
+    el.title = 'Dismiss';
+    el.onclick = () => { clearTimeout(el._t); el.remove(); };
     wrap.appendChild(el);
-    setTimeout(() => el.remove(), 5000);
+    // errors linger longer so they can actually be read; any toast dismisses on tap
+    el._t = setTimeout(() => el.remove(), kind === 'err' ? 8000 : 5000);
+  }
+
+  // Disable a button while an async action runs — the shared double-submit guard.
+  // Usage: op.busy(btn, () => op.api(...)); restores label/disabled state in finally.
+  async function busy(btn, fn, pendingLabel) {
+    if (!btn || btn.disabled) return undefined;
+    const label = btn.textContent;
+    btn.disabled = true;
+    if (pendingLabel) btn.textContent = pendingLabel;
+    try { return await fn(); }
+    finally { btn.disabled = false; btn.textContent = label; }
   }
 
   function money(cents) {
@@ -125,5 +148,5 @@ window.op = (() => {
     return me;
   }
 
-  return { api, toast, money, esc, fmtTime, fmtDate, init, get me() { return me; } };
+  return { api, toast, busy, money, esc, fmtTime, fmtDate, init, get me() { return me; } };
 })();

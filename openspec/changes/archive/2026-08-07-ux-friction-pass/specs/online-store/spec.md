@@ -1,20 +1,6 @@
-# online-store Specification
+# online-store (delta)
 
-## Purpose
-Guest web store: anonymous storefront where visitors browse tickets and memberships,
-check out with simulated payment, and receive their codes — all posting through the same
-`pos.finalizeOrder` path as the desk POS.
-## Requirements
-### Requirement: Anonymous guest storefront
-
-`web/store/` SHALL be a guest-facing storefront (no login, lighter branding than back
-office): landing page with venue info, ticket list, event pages with a date picker and
-session availability (remaining counts / sold-out badges), and a persistent cart (localStorage).
-All store APIs live under `/api/store/*` and require no session.
-
-#### Scenario: Browse availability
-- **WHEN** a guest opens the Planetarium page and picks a date
-- **THEN** that day's sessions render with remaining seats, sold-out sessions unbuyable.
+## MODIFIED Requirements
 
 ### Requirement: Checkout with simulated payment
 
@@ -51,37 +37,7 @@ share one event) so the guest can pick another showtime in one tap.
 - **THEN** both fields show inline errors, the first invalid field is focused, and no
   request is sent; fixing a field clears its error immediately.
 
-### Requirement: Confirmation and print-at-home tickets
-
-A successful order SHALL show a confirmation page (order `W-XXXXXXXXX`) listing each ticket
-with its Code 39 barcode, session details, and validity — print-styled one ticket per page.
-The confirmation is retrievable later at `/store/order.html?code=W-…&email=…` (both must
-match).
-
-#### Scenario: Lost tab recovery
-- **WHEN** a guest re-opens the order URL with the right order code and email
-- **THEN** their tickets render again; a wrong email yields a not-found error, not data.
-
-### Requirement: Same rules as POS
-
-The store SHALL reuse the shared sellable feed, availability API, discount validation, and
-posting path — a price/tax/discount/capacity rule can never differ between channels.
-
-#### Scenario: Capacity shared with POS
-- **WHEN** POS sells the last seats of a session while a web guest has them in cart
-- **THEN** the guest's checkout fails with a capacity error and invites picking another
-  session.
-
-### Requirement: Phone-width storefront rendering
-
-The guest store SHALL render without horizontal page overflow at phone widths (~390px):
-the product grid falls to one column, the cart table scrolls within its own bounds, the
-hero scales down, tap targets remain touch-sized, and the top bar respects device
-safe-area insets. Print-at-home ticket styling SHALL be unaffected.
-
-#### Scenario: Checkout on an iPhone
-- **WHEN** a guest browses, picks a session, and checks out at a 390px-wide viewport
-- **THEN** every step renders within the viewport width with no horizontal page scroll.
+## ADDED Requirements
 
 ### Requirement: Venue-branded storefront chrome
 
@@ -108,4 +64,3 @@ cart succeeds on the first tap.
 - **WHEN** a guest picks a showtime for an event with a single ticket product and taps
   Add to cart
 - **THEN** one ticket is added without first editing a quantity field.
-

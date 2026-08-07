@@ -34,7 +34,7 @@ gs.init('order');
 async function lookup(code, email) {
   const errBox = document.getElementById('error');
   errBox.innerHTML = '';
-  document.getElementById('order').innerHTML = '';
+  document.getElementById('order').innerHTML = '<p class="st-muted">Looking up your order…</p>';
   document.getElementById('actions').style.display = 'none';
   try {
     const { order } = await gs.api(
@@ -43,6 +43,8 @@ async function lookup(code, email) {
     gs.renderOrder(order, document.getElementById('order'));
     document.getElementById('actions').style.display = '';
   } catch (err) {
+    // deliberately combined message — never reveals which half was wrong
+    document.getElementById('order').innerHTML = '';
     errBox.innerHTML =
       '<div class="st-error">No order matches that code and email. Check both and try again.</div>';
   }

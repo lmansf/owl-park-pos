@@ -113,6 +113,7 @@ document.getElementById('add-btn').addEventListener('click', () => {
     if (qty > 0) {
       gs.cartAdd({
         product_id: p.id, name: p.name, price_cents: p.price_cents, qty,
+        tax_rate_bp: p.tax_rate_bp, event_id: eventId,
         event_session_id: selectedSession.id,
         session_label: gs.fmtSession(selectedSession.starts_at),
       });
@@ -129,6 +130,7 @@ document.getElementById('add-btn').addEventListener('click', () => {
   try {
     cat = await gs.api('/api/store/catalog');
   } catch (err) { showError(err.message); return; }
+  gs.setVenue(cat.venue);
   const ev = cat.events.find((e) => e.id === eventId);
   if (!ev) { showError('This event is not on sale online.'); return; }
   document.getElementById('ev-name').textContent = ev.name;
@@ -137,9 +139,11 @@ document.getElementById('add-btn').addEventListener('click', () => {
 
   products = cat.products.filter((p) => p.event_id === eventId);
   document.getElementById('buy-panel').style.display = '';
+  // single ticket type: default to 1 so pick-a-time → Add to cart works first tap
+  const defQty = products.length === 1 ? 1 : 0;
   document.getElementById('buy-rows').innerHTML = products.map((p) => `
     <label class="st-field" style="display:flex;align-items:center;gap:12px">
-      <input type="number" class="st-qty" id="qty-${p.id}" min="0" max="20" value="0">
+      <input type="number" class="st-qty" id="qty-${p.id}" min="0" max="20" value="${defQty}">
       <span style="flex:1;margin:0">${gs.esc(p.name)}</span>
       <strong>${gs.money(p.price_cents)}</strong>
     </label>`).join('');

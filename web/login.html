@@ -12,6 +12,7 @@
   .login-card .op-muted { margin: 0 0 18px; }
   .demo { font-size: 12px; margin-top: 14px; }
   .lockout-hint { font-size: 12px; margin-top: 10px; color: var(--muted); }
+  .login-err { color: var(--err); font-size: 13px; margin: 0 0 10px; }
 </style>
 </head>
 <body>
@@ -25,6 +26,7 @@
     <label class="op-field"><span>Password</span>
       <input name="password" type="password" autocomplete="current-password" required style="width:100%">
     </label>
+    <p class="login-err" id="login-err" hidden>Wrong username or password — try again.</p>
     <button class="op-btn" style="width:100%">Sign in</button>
     <p class="demo op-muted" hidden>Demo: admin/admin · manager/manager · cashier/cashier · gate/gate</p>
     <p class="lockout-hint" id="lockout-hint" hidden>Too many attempts? Wait 15 minutes or contact a manager.</p>
@@ -49,7 +51,11 @@
 <script src="/shell.js"></script>
 <script>
   const params = new URLSearchParams(location.search);
-  const nextUrl = () => params.get('next') || null;
+  // only same-origin relative paths: a single leading "/" (not "//host" or "/\host")
+  const nextUrl = () => {
+    const next = params.get('next');
+    return next && /^\/(?![/\\])/.test(next) ? next : null;
+  };
   let sessionUser = null;
 
   // health drives the demo-credentials hint: only demo mode advertises passwords
@@ -78,7 +84,8 @@
   let fails = 0;
   document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const fd = new FormData(e.currentTarget);
+    const form = e.currentTarget;
+    const fd = new FormData(form);
     try {
       const res = await op.api('/api/auth/login', {
         body: { username: fd.get('username'), password: fd.get('password') },
@@ -88,7 +95,12 @@
       if (res.must_change_password && health.mode === 'production') showPwForm(res.user);
       else continueOn(res.user);
     } catch {
-      // failures are deliberately generic server-side; after a few, hint at lockout
+      // failures are deliberately generic server-side (no username oracle); recover
+      // in place: inline error, cleared password, cursor back where retry starts
+      document.getElementById('login-err').hidden = false;
+      form.elements.password.value = '';
+      form.elements.password.focus();
+      // after a few, hint at lockout
       if (++fails >= 3) document.getElementById('lockout-hint').hidden = false;
     }
   });

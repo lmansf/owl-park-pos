@@ -26,6 +26,10 @@
   .term-row.current { border-color: var(--accent); font-weight: 700; }
 
   .pos-sell { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; }
+  /* barcode-wedge / keyboard quick add — full width above the grid */
+  .pos-scan { margin-bottom: 12px; }
+  .pos-scan input { width: 100%; font-size: 16px; padding: 10px 12px; }
+  .cart-line.capacity-bad { outline: 2px solid var(--warn); outline-offset: -2px; border-radius: 8px; }
   .pos-kind h3 { margin: 14px 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
   .pos-products { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   .pos-prod {
@@ -152,7 +156,13 @@
 
   <!-- SELL -->
   <section id="view-sell" class="pos-sell no-print">
-    <div id="product-grid"></div>
+    <div>
+      <div class="pos-scan">
+        <input id="sku-q" placeholder="Scan / type a SKU or name, then Enter"
+               autocomplete="off" spellcheck="false">
+      </div>
+      <div id="product-grid"><p class="op-muted">Loading products…</p></div>
+    </div>
     <aside class="op-card pos-cart">
       <h2>Cart</h2>
       <div id="cart-lines"><p class="op-muted">Tap products to add them.</p></div>
@@ -399,6 +409,19 @@
   }
 
   function renderAutoGrid() {
+    if (!products.length) {
+      // first-run: an empty catalog would otherwise render a blank pane
+      $('product-grid').innerHTML = isManager
+        ? `<div class="op-card"><h2>Nothing to sell yet</h2>
+             <p class="op-muted">No active products are on the POS channel.
+             Add products in the <a href="/catalog.html">Catalog</a>, then design
+             button layouts in <a href="/menu-builder.html">Menus</a> (optional —
+             this grid fills in automatically).</p></div>`
+        : `<div class="op-card"><h2>Nothing to sell yet</h2>
+             <p class="op-muted">No products are configured for this register.
+             Ask a manager to add products to the catalog.</p></div>`;
+      return;
+    }
     const kinds = [['ticket', 'Tickets'], ['membership', 'Memberships'], ['addon', 'Add-ons']];
     $('product-grid').innerHTML = kinds
       .filter(([k]) => products.some((p) => p.kind === k))
@@ -458,6 +481,32 @@
     addLine(p, null, null);
   }
 
+  // ---------- quick add (barcode wedge / SKU / name) ----------
+  // Exact SKU beats exact name beats a unique prefix of either; ambiguity and
+  // misses are said out loud instead of silently doing nothing.
+  function quickAdd(q) {
+    q = q.trim().toLowerCase();
+    if (!q) return;
+    const bySku = products.find((p) => p.sku.toLowerCase() === q);
+    const byName = bySku || products.find((p) => p.name.toLowerCase() === q);
+    let hit = byName;
+    if (!hit) {
+      const prefix = products.filter((p) =>
+        p.sku.toLowerCase().startsWith(q) || p.name.toLowerCase().startsWith(q));
+      if (prefix.length > 1) {
+        op.toast(`${prefix.length} products match “${q}” — keep typing`, 'err');
+        return;
+      }
+      hit = prefix[0];
+    }
+    if (!hit) { op.toast(`No product matches “${q}”`, 'err'); return; }
+    $('sku-q').value = '';
+    tapProduct(hit);
+  }
+  $('sku-q').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); quickAdd($('sku-q').value); }
+  });
+
   function addLine(product, session, member) {
     const existing = cart.find((l) =>
       l.product.id === product.id &&
@@ -465,17 +514,19 @@
       !l.member && !member);
     if (existing) existing.qty++;
     else cart.push({ product, qty: 1, session, member });
+    flagSessions = false;
     renderCart();
   }
 
   // ---------- cart ----------
+  let flagSessions = false; // set after a capacity 409 so session lines stand out
   function renderCart() {
     const box = $('cart-lines');
     if (!cart.length) {
-      box.innerHTML = '<p class="op-muted">Tap products to add them.</p>';
+      box.innerHTML = '<p class="op-muted">Tap products to add them — or scan / type a SKU above.</p>';
     } else {
       box.innerHTML = cart.map((l, i) => `
-        <div class="cart-line">
+        <div class="cart-line${flagSessions && l.session ? ' capacity-bad' : ''}">
           <div class="desc">${esc(l.product.name)}
             ${l.session ? `<small>${op.fmtDate(l.session.starts_at)} ${op.fmtTime(l.session.starts_at)}</small>` : ''}
             ${l.member ? `<small>${esc(l.member.label)}</small>` : ''}
@@ -490,6 +541,7 @@
           const l = cart[Number(b.dataset.i)];
           l.qty += Number(b.dataset.d);
           if (l.qty <= 0) cart.splice(Number(b.dataset.i), 1);
+          flagSessions = false; // the cashier is adjusting — clear the sold-out flags
           renderCart();
         };
       }
@@ -504,7 +556,7 @@
   }
 
   $('btn-clear').onclick = () => {
-    cart = []; discount = null; currentOrder = null;
+    cart = []; discount = null; currentOrder = null; flagSessions = false;
     $('disc-applied').textContent = ''; $('disc-code').value = '';
     $('cust-name').value = ''; $('cust-email').value = '';
     renderCart();
@@ -517,8 +569,16 @@
       discount = (await op.api('/api/catalog/discounts/validate', { body: { code } })).discount;
       $('disc-applied').innerHTML = `<span class="op-badge ok">${esc(discount.code)} — ${esc(discount.name)}</span>`;
       renderCart();
-    } catch { discount = null; $('disc-applied').textContent = ''; renderCart(); }
+    } catch {
+      // leave the typed code in place for correction, but say why nothing applied
+      discount = null;
+      $('disc-applied').innerHTML = '<span class="op-badge err">Code not valid — check spelling or Discounts page</span>';
+      renderCart();
+    }
   };
+  $('disc-code').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $('btn-disc').onclick(); }
+  });
 
   // ---------- session picker ----------
   const dlgSess = $('dlg-session');
@@ -650,12 +710,40 @@
       customer: { name: $('cust-name').value.trim(), email: $('cust-email').value.trim() },
     };
     try {
-      currentOrder = (await op.api('/api/pos/orders', { body })).order;
-    } catch { return; }
+      // op.busy = double-tap guard; a second click while the order posts is a no-op
+      const r = await op.busy($('btn-tender'), () => op.api('/api/pos/orders', { body }));
+      if (!r) return;
+      currentOrder = r.order;
+    } catch { $('btn-tender').disabled = !cart.length; return; }
+    $('btn-tender').disabled = !cart.length;
     tenders = [];
     renderTender();
     dlgTender.showModal();
+    focusTenderInput();
   };
+
+  // Cursor lands in the first exact-amount tender row (prefilled with the total),
+  // so an exact card sale is Enter (add) then Enter (finalize).
+  function focusTenderInput() {
+    const inp = $('tender-rows').querySelector('input[data-method]:not([data-change])')
+      || $('tender-rows').querySelector('input[data-method]');
+    if (inp) { inp.focus(); inp.select(); }
+  }
+  // Enter inside the dialog: on a tender row it adds that tender; anywhere else it
+  // finalizes once Finalize is enabled. Esc keeps its native close behavior.
+  dlgTender.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const row = e.target.closest && e.target.closest('.tender-row');
+    if (row) {
+      e.preventDefault();
+      row.querySelector('[data-add]').click();
+      return;
+    }
+    if (e.target.tagName !== 'BUTTON' && !$('tender-finalize').disabled) {
+      e.preventDefault();
+      $('tender-finalize').click();
+    }
+  });
 
   function parseAmt(v) {
     const n = Math.round(parseFloat(String(v).replace(/[$,]/g, '')) * 100);
@@ -679,7 +767,8 @@
     $('tender-rows').innerHTML = tenderTypes.map((t, i) => `
       <div class="tender-row">
         <span class="t-label">${esc(t.label)}</span>
-        <input data-method="${esc(t.method)}" inputmode="decimal" placeholder="0.00"
+        <input data-method="${esc(t.method)}"${t.change ? ' data-change="1"' : ''}
+          inputmode="decimal" placeholder="0.00"
           value="${!t.change && remaining ? (remaining / 100).toFixed(2) : ''}">
         <button class="op-btn secondary" data-add="${esc(t.method)}">Add ${esc(t.label.toLowerCase())}</button>
       </div>
@@ -690,6 +779,9 @@
         const amt = parseAmt(b.parentElement.querySelector('input').value);
         if (!amt) return op.toast(`Enter a ${tenderLabel(method).toLowerCase()} amount`, 'err');
         tenders.push({ method, amount_cents: amt }); renderTender();
+        // keep the keyboard flow alive across the re-render
+        if (!$('tender-finalize').disabled) $('tender-finalize').focus();
+        else focusTenderInput();
       };
     }
 
@@ -722,8 +814,13 @@
     }
   }
   $('tender-finalize').onclick = async () => {
+    // disable-while-pending: a double Enter/click must not fire finalize twice
+    // (the server would 409 the second call, but the UI never lets it happen)
     try {
-      const result = await op.api(`/api/pos/orders/${currentOrder.id}/finalize`, { body: { payments: tenders } });
+      const result = await op.busy($('tender-finalize'),
+        () => op.api(`/api/pos/orders/${currentOrder.id}/finalize`, { body: { payments: tenders } }),
+        'Finalizing…');
+      if (!result) return; // guarded re-entry
       dlgTender.close();
       $('btn-clear').onclick();
       receiptFrom = 'sell';
@@ -731,7 +828,13 @@
       show('receipt');
       if (result.change_cents > 0) op.toast('Change due: ' + money(result.change_cents), 'ok');
     } catch (err) {
-      if (err.code === 'capacity') dlgTender.close();
+      if (err.code === 'capacity') {
+        // the session sold out under us — point at the affected cart lines
+        dlgTender.close();
+        flagSessions = true;
+        renderCart();
+        op.toast('Highlighted session lines need a different session or fewer seats', 'err');
+      }
       if (err.code === 'no_open_drawer') {
         // cash needs a drawer — take the cashier straight to the open form
         dlgTender.close();
@@ -1105,7 +1208,10 @@
   // ---------- order search ----------
   async function searchOrders() {
     const q = $('order-q').value.trim();
-    const { orders } = await op.api('/api/pos/orders?q=' + encodeURIComponent(q));
+    $('order-rows').innerHTML = '<tr><td colspan="6" class="op-muted">Searching…</td></tr>';
+    let orders;
+    try { ({ orders } = await op.api('/api/pos/orders?q=' + encodeURIComponent(q))); }
+    catch { $('order-rows').innerHTML = ''; return; }
     $('order-rows').innerHTML = orders.length ? orders.map((o) => `
       <tr data-id="${o.id}" style="cursor:pointer">
         <td class="mono">${esc(o.confirmation || '—')}</td>
@@ -1126,6 +1232,22 @@
   }
   $('btn-order-search').onclick = searchOrders;
   $('order-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchOrders(); });
+
+  // ---------- keyboard layer ----------
+  // F2 (anywhere in Sell view) and Enter (when no field has focus) open the tender
+  // dialog — alternate triggers of the same $('btn-tender') handler, never a second
+  // code path. Dialogs keep their own Enter handling; Esc closes them natively.
+  document.addEventListener('keydown', (e) => {
+    if (document.querySelector('dialog[open]')) return;
+    if ($('view-sell').hidden) return;
+    const typing = /^(INPUT|SELECT|TEXTAREA|BUTTON|A)$/.test(e.target.tagName) ||
+      Boolean(e.target.closest && e.target.closest('a, button'));
+    if (e.key === 'F2' || (e.key === 'Enter' && !typing)) {
+      if ($('btn-tender').disabled) return;
+      e.preventDefault();
+      $('btn-tender').onclick();
+    }
+  });
 
   // ---------- boot ----------
   renderTerminalChip();

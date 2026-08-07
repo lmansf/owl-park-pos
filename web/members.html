@@ -208,6 +208,11 @@
     }
     for (const b of $('prog-rows').querySelectorAll('button[data-del]')) {
       b.onclick = async () => {
+        const p = programs.find((x) => x.id === Number(b.dataset.del));
+        // deletion is irreversible — confirm like every other destructive action
+        // (the server still refuses programs that have members)
+        if (!confirm(`Delete program "${p.name}"? This cannot be undone. ` +
+          'Programs that already have members cannot be deleted.')) return;
         try {
           await op.api('/api/membership/programs/' + b.dataset.del, { method: 'DELETE' });
           op.toast('Program deleted', 'ok');

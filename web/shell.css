@@ -70,6 +70,11 @@ input, select, textarea {
   border-radius: 8px; padding: 8px 10px; font: inherit; max-width: 100%;
 }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+/* keyboard-driven flows (POS quick keys, tab order) need a visible focus ring on
+   every actionable element, not just text inputs */
+button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 label.op-field { display: block; margin-bottom: 10px; }
 label.op-field span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
 
@@ -91,6 +96,7 @@ table.op-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .op-toast {
   background: var(--panel-2); border: 1px solid var(--line); border-left: 4px solid var(--accent);
   border-radius: 8px; padding: 10px 14px; max-width: 360px; box-shadow: 0 6px 24px rgba(0,0,0,.4);
+  cursor: pointer; /* click to dismiss */
 }
 .op-toast.err { border-left-color: var(--err); }
 .op-toast.ok { border-left-color: var(--ok); }
@@ -102,6 +108,14 @@ dialog.op-modal {
 dialog.op-modal::backdrop { background: rgba(0,0,0,.6); }
 
 .op-muted { color: var(--muted); }
+/* loading placeholder block (KPI tiles, table cells awaiting first fetch) */
+.op-skel {
+  display: inline-block; min-width: 70px; height: 1em; border-radius: 6px;
+  background: linear-gradient(90deg, var(--panel-2) 25%, var(--line) 50%, var(--panel-2) 75%);
+  background-size: 200% 100%; animation: op-skel 1.2s linear infinite;
+}
+@keyframes op-skel { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .op-skel { animation: none; } }
 .op-right { text-align: right; }
 .op-grid { display: grid; gap: 12px; }
 

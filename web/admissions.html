@@ -102,6 +102,27 @@
   const input = $('scan-input');
   const result = $('result');
 
+  // Gate name survives reloads (a phone at the side gate stays "side" all day).
+  // The value is only ever the string sent to /api/admissions/scan, which
+  // sanitizes/defaults it server-side.
+  try {
+    const savedGate = localStorage.getItem('op_gate');
+    if (savedGate) $('gate-input').value = savedGate;
+  } catch { /* storage unavailable — keep the default */ }
+  $('gate-input').addEventListener('input', () => {
+    try { localStorage.setItem('op_gate', $('gate-input').value.trim() || 'main'); } catch { /* ignore */ }
+  });
+
+  // A stray tap must never eat the next barcode scan: refocus the scan box
+  // whenever focus is lost to something that isn't itself interactive.
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('input, select, textarea, button, a, dialog')) return;
+    input.focus();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) input.focus();
+  });
+
   const REASON_TEXT = {
     unknown: 'Code not recognized',
     void: 'Ticket voided',

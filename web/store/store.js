@@ -47,7 +47,10 @@
     localStorage.setItem(CART_KEY, JSON.stringify(items));
     renderCartCount();
   }
-  // item: {product_id, name, price_cents, qty, event_session_id?, session_label?}
+  // item: {product_id, name, price_cents, qty, tax_rate_bp?, event_id?,
+  //        event_session_id?, session_label?}
+  // price_cents/tax_rate_bp are display-only estimates — the server reprices every
+  // line from the catalog at checkout, so tampering here changes nothing charged.
   function cartAdd(item) {
     const items = cartGet();
     const found = items.find(
@@ -72,12 +75,26 @@
   }
 
   // ---- shared chrome -----------------------------------------------------------
+  // The header brand is the venue name from /api/store/catalog (cached locally so
+  // pages that don't fetch the catalog, like the cart, still show it). Pages that
+  // do fetch it call setVenue() to keep the cache fresh.
+  const VENUE_KEY = 'opstore_venue';
+  function venueName() {
+    try { return localStorage.getItem(VENUE_KEY) || 'Owl Park'; } catch { return 'Owl Park'; }
+  }
+  function setVenue(name) {
+    if (!name || typeof name !== 'string') return;
+    try { localStorage.setItem(VENUE_KEY, name); } catch { /* ignore */ }
+    const brand = document.querySelector('.st-topbar .brand .brand-name');
+    if (brand) brand.textContent = name;
+  }
+
   function header(active) {
     const link = (href, label, key) =>
       `<a href="${href}"${active === key ? ' style="color:#fff"' : ''}>${label}</a>`;
     return `
       <header class="st-topbar st-noprint">
-        <a class="brand" href="/store/">AURORA SCIENCE PARK<small>tickets</small></a>
+        <a class="brand" href="/store/"><span class="brand-name">${esc(venueName())}</span><small>tickets</small></a>
         <nav>
           ${link('/store/', 'Tickets', 'home')}
           ${link('/store/order.html', 'Find my order', 'order')}
@@ -143,7 +160,7 @@
   }
 
   window.gs = {
-    api, money, esc, fmtSession, init, renderOrder,
+    api, money, esc, fmtSession, init, renderOrder, setVenue,
     cartGet, cartSave, cartAdd, cartClear, cartCount,
   };
 })();

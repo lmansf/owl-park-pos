@@ -38,7 +38,11 @@ switch terminals, and the register then shows only that terminal's assigned menu
 (see the Menus page below). The claim is remembered per browser, is purely a menu-layout
 choice — prices and permissions never change with it — and cashiers see the claimed name
 read-only. Tap items to add to the cart; event-linked items (Planetarium) open a
-session picker showing remaining seats. Right side: the cart — quantities, discount code
+session picker showing remaining seats. The **quick-add box** above the grid is
+barcode-wedge friendly: scan or type a SKU (or the start of a name) and press Enter to
+add it. The whole sale works keyboard-only — **Enter** (with no field focused) or **F2**
+opens the tender dialog with the exact card amount prefilled, so an exact-card sale is
+Enter · Enter · Enter. Right side: the cart — quantities, discount code
 box, running totals (on phone-width screens the menu stacks above the cart). **Tender** opens the payment modal with one row per configured
 tender — cash (quick-bill buttons, change calculated), simulated card, and a demo
 voucher (always approves); split tenders are fine. Finalizing shows the receipt
@@ -69,7 +73,9 @@ member pass (`M-…`) code and press Enter — a full-panel green OK or red DENI
 shows the holder and, when denied, the machine reason (`expired`, `exhausted`,
 `wrong_session_time`, `void`, `unknown`, `suspended`). Session tickets admit from 30
 minutes before their session start until session end. The page shows today's admit count
-and the last scans. Managers/admins also get a **simulator** drawer listing currently
+and the last scans. The gate name (top right) is remembered on this device across
+reloads, and the scan box re-grabs focus after stray taps — a scanner never types into
+the void. Managers/admins also get a **simulator** drawer listing currently
 valid tickets and active members for one-click demo scans.
 
 ### Catalog (`/catalog.html`) and Item Config (`/item-config.html?id=…`)
@@ -156,10 +162,13 @@ A condensed version of this guide, in-app.
 
 ## The guest store (`/store/`)
 
-Landing page (hero + sections from the Store Builder), event pages with a date picker and
+Landing page (hero + sections from the Store Builder; the header shows your venue name),
+event pages with a date picker and
 live seat availability, cart (kept in the browser), and checkout: name + email, optional
 discount code, simulated card — any well-formed number approves; **`4000 0000 0000 0002`
-always declines** (for testing the failure path). The confirmation page shows print-at-home
+always declines** (for testing the failure path). The cart shows the exact tax and total
+that will be charged, validates the three fields inline before anything is sent, and
+Enter submits from any field. The confirmation page shows print-at-home
 tickets with barcodes, one per page when printed. Lost the tab? `/store/order.html` re-opens
 any order with its `W-…` confirmation code plus the checkout email. Memberships bought
 online show the printable pass card on the confirmation page.
