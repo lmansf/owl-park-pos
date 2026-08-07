@@ -171,12 +171,18 @@
   // ---- save ----
   f.addEventListener('submit', async (e) => {
     e.preventDefault();
+    const price = Number(f.price.value);
+    if (f.price.value === '' || !Number.isFinite(price) || price < 0) {
+      op.toast('Enter a price', 'err');
+      if (cfg) f.price.value = (cfg.product.price_cents / 100).toFixed(2);
+      return;
+    }
     const channels = [f['ch-pos'].checked && 'pos', f['ch-web'].checked && 'web'].filter(Boolean);
     const body = {
       sku: f.sku.value,
       name: f.name.value,
       kind: f.kind.value,
-      price_cents: Math.round(Number(f.price.value) * 100),
+      price_cents: Math.round(price * 100),
       tax_group_id: Number(f.tax_group_id.value),
       event_id: f.event_id.value ? Number(f.event_id.value) : null,
       membership_program_id: f.membership_program_id.value ? Number(f.membership_program_id.value) : null,

@@ -1,5 +1,5 @@
 'use strict';
-const { ApiError } = require('../core/http');
+const { ApiError, toInt } = require('../core/http');
 const { tx } = require('../core/db');
 const { audit } = require('../core/auth');
 
@@ -46,13 +46,6 @@ function groupsForProduct(db, productId) {
 
 function bad(message) {
   return new ApiError(400, 'bad_request', message);
-}
-
-function toInt(v, field, { min = null } = {}) {
-  const n = Number(v);
-  if (!Number.isInteger(n)) throw bad(`${field} must be an integer`);
-  if (min !== null && n < min) throw bad(`${field} must be >= ${min}`);
-  return n;
 }
 
 function toBit(v) {

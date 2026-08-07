@@ -37,12 +37,12 @@ It's a demo deployment, not a system of record.
 
 ## Design
 
-Spec-driven via OpenSpec: current per-system specs live in `openspec/specs/`, and in-flight
-proposals live in `openspec/changes/`. Shipped changes are archived under
-`openspec/changes/archive/`, where each keeps its proposal, design, spec deltas, and
-tasks; the founding `pos-mvp` change holds the module boundaries and frozen cross-module
-contracts. The short
-version: every module under `server/modules/` owns its routes and exports a small contract;
+Spec-driven via OpenSpec: the current per-system specs in `openspec/specs/` are the
+authority on module boundaries and cross-module contracts, and in-flight proposals live
+in `openspec/changes/`. Shipped changes are archived under `openspec/changes/archive/`,
+where each keeps its proposal, design, spec deltas, and tasks — read those for the
+reasoning behind a decision, not for current signatures, which have moved on since. The
+short version: every module under `server/modules/` owns its routes and exports a small contract;
 orders are finalized through one shared posting path (`pos.finalizeOrder`), and every gate
 decision goes through one shared validation path (`admissions.checkCode`).
 

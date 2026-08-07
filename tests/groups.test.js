@@ -158,6 +158,20 @@ test('groups: CRUD, assignment, exports, audit', async (t) => {
       (await mgr('PUT', `/api/groups/${groupId}/products`, { product_ids: 'nope' })).status, 400);
     assert.equal(
       (await mgr('PUT', `/api/groups/${groupId}/products`, { product_ids: [999999] })).status, 400);
+    // strict ints: Number() would coerce true->1 and [2]->2, quietly assigning
+    // whichever product happens to hold that id
+    const before = groupsMod.productIdsInGroup(db, groupId).slice().sort((a, b) => a - b);
+    for (const v of [true, [dayTicketIds[0]], null, '', {}]) {
+      assert.equal(
+        (await mgr('PUT', `/api/groups/${groupId}/products`, { product_ids: [v] })).status, 400,
+        `product_ids [${JSON.stringify(v)}] must be rejected`);
+    }
+    for (const v of [true, [2], '']) {
+      assert.equal((await mgr('POST', '/api/groups', { name: 'X', sort: v })).status, 400,
+        `sort ${JSON.stringify(v)} must be rejected`);
+    }
+    assert.deepEqual(groupsMod.productIdsInGroup(db, groupId).slice().sort((a, b) => a - b), before,
+      'rejected assignments must not touch membership');
     assert.equal((await mgr('GET', '/api/groups/999999')).status, 404);
     assert.equal((await mgr('PUT', '/api/groups/999999', { name: 'Z' })).status, 404);
     assert.equal((await mgr('DELETE', '/api/groups/999999')).status, 404);

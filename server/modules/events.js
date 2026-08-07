@@ -1,6 +1,6 @@
 'use strict';
 // events module — timed sessions + THE capacity gate (reserveCapacity/releaseCapacity).
-const { ApiError } = require('../core/http');
+const { ApiError, toInt } = require('../core/http');
 const { tx, now } = require('../core/db');
 const { audit } = require('../core/auth');
 
@@ -150,26 +150,17 @@ function mount(router, ctx) {
     const endDate = String(b.end_date || '');
     const startTime = String(b.start_time || '');
     const endTime = String(b.end_time || '');
-    const interval = Number(b.interval_minutes);
-    const capacity = Number(b.capacity);
+    const interval = toInt(b.interval_minutes, 'interval_minutes', { min: 1 });
+    const capacity = toInt(b.capacity, 'capacity', { min: 1 });
     const duration = b.duration_minutes === undefined || b.duration_minutes === '' || b.duration_minutes === null
       ? interval
-      : Number(b.duration_minutes);
+      : toInt(b.duration_minutes, 'duration_minutes', { min: 1 });
 
     if (!DATE_RE.test(startDate) || !DATE_RE.test(endDate)) {
       throw new ApiError(400, 'bad_dates', 'start_date and end_date must be YYYY-MM-DD');
     }
     if (!TIME_RE.test(startTime) || !TIME_RE.test(endTime)) {
       throw new ApiError(400, 'bad_times', 'start_time and end_time must be HH:MM');
-    }
-    if (!Number.isInteger(interval) || interval <= 0) {
-      throw new ApiError(400, 'bad_interval', 'interval_minutes must be a positive integer');
-    }
-    if (!Number.isInteger(capacity) || capacity <= 0) {
-      throw new ApiError(400, 'bad_capacity', 'capacity must be a positive integer');
-    }
-    if (!Number.isInteger(duration) || duration <= 0) {
-      throw new ApiError(400, 'bad_duration', 'duration_minutes must be a positive integer');
     }
 
     const day0 = localDate(startDate, '00:00');
@@ -218,10 +209,7 @@ function mount(router, ctx) {
 
   // Edit capacity — never below sold.
   router.put('/api/events/sessions/:id', ['admin', 'manager'], (req) => {
-    const capacity = Number(req.body.capacity);
-    if (!Number.isInteger(capacity) || capacity <= 0) {
-      throw new ApiError(400, 'bad_capacity', 'capacity must be a positive integer');
-    }
+    const capacity = toInt(req.body.capacity, 'capacity', { min: 1 });
     return tx(db, () => {
       const s = getSession(db, req.params.id);
       if (!s) throw new ApiError(404, 'no_session', 'Session not found');

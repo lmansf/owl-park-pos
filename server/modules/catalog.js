@@ -1,5 +1,5 @@
 'use strict';
-const { ApiError } = require('../core/http');
+const { ApiError, toInt } = require('../core/http');
 const { audit } = require('../core/auth');
 const { now } = require('../core/db');
 
@@ -53,20 +53,6 @@ function validateDiscount(db, code) {
 
 function bad(message) {
   return new ApiError(400, 'bad_request', message);
-}
-
-function toInt(v, field, { min = null, max = null } = {}) {
-  // Strict: only real numbers or non-empty numeric strings. Number() alone
-  // coerces null->0, true->1, [7]->7 — a PUT {price_cents: null} must 400,
-  // never silently zero a price.
-  const n =
-    typeof v === 'number' ? v
-      : typeof v === 'string' && v.trim() !== '' ? Number(v)
-        : NaN;
-  if (!Number.isInteger(n)) throw bad(`${field} must be an integer`);
-  if (min !== null && n < min) throw bad(`${field} must be >= ${min}`);
-  if (max !== null && n > max) throw bad(`${field} must be <= ${max}`);
-  return n;
 }
 
 function toBit(v) {

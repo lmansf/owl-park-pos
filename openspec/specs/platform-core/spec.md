@@ -316,3 +316,25 @@ whole request headers/bodies.
 - **THEN** exactly one log line is emitted and it parses as a single JSON record with
   the payload as string data.
 
+### Requirement: Strict integer request fields
+
+Integer fields in request bodies SHALL be parsed by the shared `toInt` helper exported
+from `server/core/http.js` — modules SHALL NOT re-implement it. Only a JavaScript number
+or a non-empty numeric string SHALL be accepted; `null`, `undefined`, `true`, arrays,
+objects, and `''` SHALL be rejected with 400 `bad_request` rather than coerced (as
+`Number()` would, turning `null` into 0 and `true` into 1), and non-integers or values
+outside a field's declared min/max SHALL be rejected the same way. A rejected write SHALL
+leave stored data untouched. One carve-out: cash-drawer money amounts (`checkCents` in
+`server/modules/drawer.js`) are deliberately stricter than the shared helper — they SHALL
+accept JSON numbers only, rejecting numeric strings along with every coercible shape.
+
+#### Scenario: A cleared price field cannot zero a price
+- **WHEN** a manager PUTs `{price_cents: null}` to a catalog product, or a price-program
+  entry with `price_cents: null`
+- **THEN** the request returns 400 and the product's price and the program's stored
+  override are unchanged — nothing becomes sellable for $0.
+
+#### Scenario: A coercible reference cannot retarget a record
+- **WHEN** a builder payload carries `product_id: true` or `product_id: [7]`
+- **THEN** the request returns 400 instead of binding product 1 or product 7.
+

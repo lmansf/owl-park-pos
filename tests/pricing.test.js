@@ -277,3 +277,64 @@ test('pricing: auth and validation', async (t) => {
     assert.equal(r.status, 404);
   });
 });
+
+test('pricing: a cleared override price is rejected, never a $0 program price', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const c = client(base);
+  await c('POST', '/api/auth/login', { username: 'manager', password: 'manager' });
+
+  const adult = db.prepare("SELECT id, price_cents FROM products WHERE sku = 'ADULT'").get();
+  const live = await c('POST', '/api/pricing/programs', {
+    name: 'Spring', starts_on: localDate(-1), ends_on: localDate(7), priority: 5,
+  });
+  const programId = live.data.program.id;
+  await c('PUT', `/api/pricing/programs/${programId}/entries`, {
+    entries: [{ product_id: adult.id, price_cents: 2495 }],
+  });
+
+  await t.test('a null/blank/true price_cents 400s instead of posting a free ticket', async () => {
+    // Number(null) is 0: a cleared price field (or a NaN that JSON-serialised to
+    // null) used to store a 0-cent override — the program would then sell Adult
+    // admission for free everywhere, POS and web store alike.
+    for (const v of [null, '', true, [0], {}, undefined, 10.5, -1]) {
+      const r = await c('PUT', `/api/pricing/programs/${programId}/entries`, {
+        entries: [{ product_id: adult.id, price_cents: v }],
+      });
+      assert.equal(r.status, 400, `price_cents ${JSON.stringify(v)} must be rejected`);
+    }
+    const row = db
+      .prepare('SELECT price_cents FROM price_program_entries WHERE program_id = ? AND product_id = ?')
+      .get(programId, adult.id);
+    assert.equal(row.price_cents, 2495, 'the stored override survives every rejected write');
+  });
+
+  await t.test('the sellable feed still charges the override, not $0', async () => {
+    assert.equal(resolvePrice(db, adult.id, new Date().toISOString()).price_cents, 2495);
+    const sell = (await c('GET', '/api/catalog/sellable?channel=pos')).data.products;
+    assert.equal(sell.find((p) => p.id === adult.id).price_cents, 2495);
+  });
+
+  await t.test('product_id coercion cannot retarget the override', async () => {
+    // Number(true) is 1 — an override "for product true" used to price product #1
+    for (const v of [true, [adult.id], null, '', {}]) {
+      const r = await c('PUT', `/api/pricing/programs/${programId}/entries`, {
+        entries: [{ product_id: v, price_cents: 100 }],
+      });
+      assert.equal(r.status, 400, `product_id ${JSON.stringify(v)} must be rejected`);
+    }
+    const n = db
+      .prepare('SELECT COUNT(*) AS n FROM price_program_entries WHERE program_id = ?')
+      .get(programId).n;
+    assert.equal(n, 1, 'no entry added or replaced by a rejected write');
+  });
+
+  await t.test('program priority rejects coercible junk too', async () => {
+    for (const v of [true, [1], '']) {
+      const r = await c('POST', '/api/pricing/programs', {
+        name: 'Junk', starts_on: localDate(0), ends_on: localDate(0), priority: v,
+      });
+      assert.equal(r.status, 400, `priority ${JSON.stringify(v)} must be rejected`);
+    }
+  });
+});
