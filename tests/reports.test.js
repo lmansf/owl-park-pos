@@ -302,3 +302,231 @@ test('reports: dashboard, four reports, CSV parity, reconciliation', async (t) =
     assert.equal(tue.payments_cents, tue.net_cents + tue.tax_cents + tue.refund_cents);
   });
 });
+
+test('reports: group rollups (sales, admissions, dashboard, CSV, security)', async (t) => {
+  const app = await startServer();
+  t.after(() => app.server.close());
+
+  const admin = client(app.base);
+  const manager = client(app.base);
+  const cashier = client(app.base);
+  const gate = client(app.base);
+  assert.equal((await admin.call('POST', '/api/auth/login', { username: 'admin', password: 'admin' })).status, 200);
+  assert.equal((await manager.call('POST', '/api/auth/login', { username: 'manager', password: 'manager' })).status, 200);
+  assert.equal((await cashier.call('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' })).status, 200);
+  assert.equal((await gate.call('POST', '/api/auth/login', { username: 'gate', password: 'gate' })).status, 200);
+
+  const cat = (await cashier.call('GET', '/api/catalog/sellable?channel=pos')).data.products;
+  const bySku = Object.fromEntries(cat.map((p) => [p.sku, p]));
+
+  // One mixed discounted order: 2×ADULT + 1×CHILD + 1×MEM-EXP (membership stays
+  // ungrouped throughout).
+  const o1 = (await cashier.call('POST', '/api/pos/orders', {
+    lines: [
+      { product_id: bySku.ADULT.id, qty: 2 },
+      { product_id: bySku.CHILD.id, qty: 1 },
+      { product_id: bySku['MEM-EXP'].id, qty: 1,
+        member: { name: 'Gia Group', email: 'gia.group@example.com' } },
+    ],
+    discount_code: 'SAVE10',
+  })).data.order;
+  const f1 = (await cashier.call('POST', `/api/pos/orders/${o1.id}/finalize`, {
+    payments: [{ method: 'cash', amount_cents: o1.total_cents }],
+  })).data;
+  assert.equal(f1.tickets.length, 3);
+
+  const today = dstr(new Date());
+  const rangeQ = `from=${today}&to=${today}`;
+  // Expected per-product line aggregates, straight from the DB (line-level discount
+  // and tax are exact integer-cent allocations, see pos.js).
+  const lineAgg = (productId) => app.db.prepare(
+    `SELECT COALESCE(SUM(ol.qty), 0) AS units,
+            COALESCE(SUM(ol.qty * ol.unit_price_cents), 0) AS gross,
+            COALESCE(SUM(ol.discount_cents), 0) AS disc,
+            COALESCE(SUM(ol.tax_cents), 0) AS tax
+     FROM order_lines ol JOIN orders o ON o.id = ol.order_id
+     WHERE ol.product_id = ? AND o.status IN ('paid', 'refunded')`
+  ).get(productId);
+
+  await t.test('no groups yet: everything lands in Ungrouped, reconciles with product mix', async () => {
+    const rep = (await manager.call('GET', `/api/reports/sales?${rangeQ}&group_by=group`)).data;
+    const sec = rep.sections[0];
+    assert.equal(sec.title, 'Sales by item group');
+    assert.equal(sec.rows.length, 1);
+    assert.equal(sec.rows[0].group, 'Ungrouped');
+    const mix = (await manager.call('GET', `/api/reports/product-mix?${rangeQ}`)).data;
+    assert.equal(sec.totals.gross_cents, mix.sections[0].totals.gross_cents,
+      'no multi-group membership → group gross equals product-mix gross');
+    assert.equal(sec.rows[0].net_cents, sec.rows[0].gross_cents - sec.rows[0].discount_cents);
+  });
+
+  // Groups: ADULT in both (multi-group case), CHILD in Tickets only, MEM-EXP in none.
+  const gTickets = (await admin.call('POST', '/api/groups', { name: 'Tickets', sort: 1 })).data.group;
+  const gFood = (await admin.call('POST', '/api/groups', { name: 'Food', sort: 2 })).data.group;
+  assert.equal((await admin.call('PUT', `/api/groups/${gTickets.id}/products`,
+    { product_ids: [bySku.ADULT.id, bySku.CHILD.id] })).status, 200);
+  assert.equal((await admin.call('PUT', `/api/groups/${gFood.id}/products`,
+    { product_ids: [bySku.ADULT.id] })).status, 200);
+
+  await t.test('rollup math: multi-group double count, disclosure note, Ungrouped bucket', async () => {
+    const adult = lineAgg(bySku.ADULT.id);
+    const child = lineAgg(bySku.CHILD.id);
+    const mem = lineAgg(bySku['MEM-EXP'].id);
+    const rep = (await manager.call('GET', `/api/reports/sales?${rangeQ}&group_by=group`)).data;
+    const sec = rep.sections[0];
+    assert.deepEqual(sec.rows.map((r) => r.group), ['Tickets', 'Food', 'Ungrouped']);
+    const [tix, food, ung] = sec.rows;
+    for (const r of sec.rows) {
+      assert.equal(r.net_cents, r.gross_cents - r.discount_cents, 'net = gross - discounts');
+      for (const c of sec.columns) if (c !== 'group') assert.ok(Number.isInteger(r[c]), `${c} is integer cents`);
+    }
+    assert.deepEqual(
+      { units: tix.units, gross: tix.gross_cents, disc: tix.discount_cents, tax: tix.tax_cents },
+      { units: adult.units + child.units, gross: adult.gross + child.gross,
+        disc: adult.disc + child.disc, tax: adult.tax + child.tax });
+    assert.deepEqual({ units: food.units, gross: food.gross_cents },
+      { units: adult.units, gross: adult.gross }, 'ADULT counts again in Food');
+    assert.deepEqual({ units: ung.units, gross: ung.gross_cents },
+      { units: mem.units, gross: mem.gross }, 'MEM-EXP lands in Ungrouped');
+    // Σ group gross exceeds the grand total by exactly the duplicated ADULT gross.
+    const mix = (await manager.call('GET', `/api/reports/product-mix?${rangeQ}`)).data;
+    assert.equal(sec.totals.gross_cents, mix.sections[0].totals.gross_cents + adult.gross);
+    assert.match(sec.note, /count in each group/);
+  });
+
+  await t.test('admissions grouped: ticket scans by group, non-ticket scans only in the note', async () => {
+    const adultTicket = app.db.prepare(
+      'SELECT code FROM tickets WHERE product_id = ?').get(bySku.ADULT.id);
+    assert.equal((await gate.call('POST', '/api/admissions/scan',
+      { code: adultTicket.code, gate: 'north' })).data.result, 'ok');
+    assert.equal((await gate.call('POST', '/api/admissions/scan',
+      { code: adultTicket.code, gate: 'north' })).data.result, 'denied'); // exhausted
+    assert.equal((await gate.call('POST', '/api/admissions/scan',
+      { code: 'T-NOPE' })).data.result, 'denied'); // unknown, no ticket_id
+
+    const rep = (await manager.call('GET', `/api/reports/admissions?${rangeQ}&group_by=group`)).data;
+    const sec = rep.sections[0];
+    assert.equal(sec.title, 'Admissions by item group');
+    assert.deepEqual(sec.rows.map((r) => r.group), ['Tickets', 'Food']);
+    for (const r of sec.rows) {
+      assert.deepEqual({ scans: r.scans, admits: r.admits, denied: r.denied },
+        { scans: 2, admits: 1, denied: 1 }, 'ADULT scans count in both its groups');
+    }
+    assert.match(sec.note, /1 member\/unknown scan/);
+    // aggregate counts only — never ticket codes, holder names, or member data
+    const leaked = JSON.stringify(rep);
+    assert.ok(!leaked.includes(adultTicket.code), 'no ticket codes in the report');
+  });
+
+  await t.test('deactivated group falls out; products re-bucket via remaining groups', async () => {
+    assert.equal((await admin.call('DELETE', `/api/groups/${gFood.id}`)).status, 200);
+    const rep = (await manager.call('GET', `/api/reports/sales?${rangeQ}&group_by=group`)).data;
+    const sec = rep.sections[0];
+    assert.deepEqual(sec.rows.map((r) => r.group), ['Tickets', 'Ungrouped']);
+    const mix = (await manager.call('GET', `/api/reports/product-mix?${rangeQ}`)).data;
+    assert.equal(sec.totals.gross_cents, mix.sections[0].totals.gross_cents,
+      'no double count once Food is deactivated');
+  });
+
+  await t.test('dashboard: revenue_by_group_today (sales-based, incl. tax)', async () => {
+    const adult = lineAgg(bySku.ADULT.id);
+    const child = lineAgg(bySku.CHILD.id);
+    const mem = lineAgg(bySku['MEM-EXP'].id);
+    const d = (await cashier.call('GET', '/api/reports/dashboard')).data;
+    assert.ok(Array.isArray(d.revenue_by_group_today));
+    assert.deepEqual(d.revenue_by_group_today, [
+      { group: 'Tickets',
+        revenue_cents: (adult.gross - adult.disc + adult.tax) + (child.gross - child.disc + child.tax) },
+      { group: 'Ungrouped', revenue_cents: mem.gross - mem.disc + mem.tax },
+    ]);
+  });
+
+  await t.test('grouped CSV matches JSON: rows, totals, note as final row, filename', async () => {
+    const rep = (await manager.call('GET', `/api/reports/sales?${rangeQ}&group_by=group`)).data;
+    const csv = await manager.raw(`/api/reports/sales?${rangeQ}&group_by=group&format=csv`);
+    assert.equal(csv.status, 200);
+    assert.match(csv.headers.get('content-type'), /text\/csv/);
+    assert.match(csv.headers.get('content-disposition'),
+      /filename="sales-by-group-\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}\.csv"/);
+    const lines = csv.text.trim().split('\n').map((l) => l.split(','));
+    const sec = rep.sections[0];
+    assert.deepEqual(lines[0], ['Sales by item group']);
+    assert.deepEqual(lines[1], sec.columns);
+    sec.rows.forEach((row, i) => {
+      assert.deepEqual(lines[2 + i], sec.columns.map((c) => String(row[c] ?? '')));
+    });
+    assert.deepEqual(lines[2 + sec.rows.length], sec.columns.map((c) => String(sec.totals[c] ?? '')));
+    assert.equal(csv.text.trim().split('\n').at(-1), sec.note, 'note is the trailing CSV row');
+  });
+
+  await t.test('security: authz matrix unchanged by group_by (JSON and CSV)', async () => {
+    for (const p of ['/api/reports/sales?group_by=group', '/api/reports/admissions?group_by=group']) {
+      assert.equal((await fetch(app.base + p)).status, 401, `anon 401 ${p}`);
+      assert.equal((await cashier.call('GET', p)).status, 403, `cashier 403 ${p}`);
+      assert.equal((await gate.call('GET', p)).status, 403, `gate 403 ${p}`);
+      assert.equal((await cashier.raw(p + '&format=csv')).status, 403, `cashier 403 CSV ${p}`);
+      assert.equal((await manager.call('GET', p)).status, 200, `manager 200 ${p}`);
+    }
+    assert.equal((await gate.call('GET', '/api/reports/dashboard')).status, 200);
+  });
+
+  await t.test('security: group_by fuzz → 400 bad_param, no side effects, no stack', async () => {
+    const before = app.db.prepare('SELECT COUNT(*) AS n FROM orders').get().n;
+    for (const v of ['bogus', "group'--", '1;DROP TABLE orders', 'GROUP']) {
+      const r = await manager.call('GET',
+        `/api/reports/sales?${rangeQ}&group_by=${encodeURIComponent(v)}`);
+      assert.equal(r.status, 400, `400 for group_by=${v}`);
+      assert.equal(r.data.error, 'bad_param');
+      assert.equal(r.data.stack, undefined, 'no stack trace leaked');
+      const ra = await manager.call('GET',
+        `/api/reports/admissions?${rangeQ}&group_by=${encodeURIComponent(v)}`);
+      assert.equal(ra.status, 400);
+    }
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM orders').get().n, before);
+  });
+
+  await t.test('security: hostile group names stay inert in JSON, CSV, and the filename', async () => {
+    const evil = '"><script>alert(1)</script>, "x';
+    const gEvil = (await admin.call('POST', '/api/groups', { name: evil, sort: 3 })).data.group;
+    assert.equal((await admin.call('PUT', `/api/groups/${gEvil.id}/products`,
+      { product_ids: [bySku.CHILD.id] })).status, 200);
+    const rep = (await manager.call('GET', `/api/reports/sales?${rangeQ}&group_by=group`)).data;
+    assert.ok(rep.sections[0].rows.some((r) => r.group === evil),
+      'JSON returns the name verbatim as inert data');
+    const csv = await manager.raw(`/api/reports/sales?${rangeQ}&group_by=group&format=csv`);
+    assert.ok(csv.text.includes('"' + evil.replace(/"/g, '""') + '"'),
+      'CSV cell is quoted with doubled quotes');
+    assert.ok(!csv.headers.get('content-disposition').includes('script'),
+      'filename never carries user text');
+
+    // Formula-injection pin: sendCSV emits leading = raw (accepted: authoring needs
+    // manager/admin). If sendCSV ever starts prefixing, update this pin deliberately.
+    const gFormula = (await admin.call('POST', '/api/groups', { name: '=1+1', sort: 4 })).data.group;
+    assert.equal((await admin.call('PUT', `/api/groups/${gFormula.id}/products`,
+      { product_ids: [bySku.CHILD.id] })).status, 200);
+    const csv2 = await manager.raw(`/api/reports/sales?${rangeQ}&group_by=group&format=csv`);
+    assert.ok(csv2.text.split('\n').some((l) => l.startsWith('=1+1,')),
+      'formula-like group name is emitted raw (pinned behavior)');
+  });
+
+  await t.test('security: range cap still enforced in group mode', async () => {
+    const r = await manager.call('GET',
+      '/api/reports/sales?from=2020-01-01&to=2026-01-01&group_by=group');
+    assert.equal(r.status, 400);
+    assert.equal(r.data.error, 'range_too_large');
+    const ra = await manager.call('GET',
+      '/api/reports/admissions?from=2020-01-01&to=2026-01-01&group_by=group');
+    assert.equal(ra.data.error, 'range_too_large');
+  });
+
+  await t.test('grouped report over an empty range returns empty rows, not an error', async () => {
+    const r = await manager.call('GET',
+      '/api/reports/sales?from=2000-01-01&to=2000-01-01&group_by=group');
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.data.sections[0].rows, []);
+    const ra = await manager.call('GET',
+      '/api/reports/admissions?from=2000-01-01&to=2000-01-01&group_by=group');
+    assert.equal(ra.status, 200);
+    assert.deepEqual(ra.data.sections[0].rows, []);
+  });
+});
