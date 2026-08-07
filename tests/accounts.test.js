@@ -198,7 +198,9 @@ test('accounts: journal balances to the cent over mixed activity', async (t) => 
     payments: [{ method: 'cash', amount_cents: order3.total_cents }],
   });
   assert.equal(fin3.status, 200);
-  const refund = await manager('POST', `/api/pos/orders/${order3.id}/refund`, {});
+  const refund = await manager('POST', `/api/pos/orders/${order3.id}/refund`, {
+    approver: { username: 'manager', password: 'manager' },
+  });
   assert.equal(refund.status, 200);
 
   const r = await manager('GET', '/api/accounts/journal' + JOURNAL_RANGE);

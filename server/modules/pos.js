@@ -4,10 +4,9 @@
 // mutates event_sessions.sold — the online store must call it too.
 const { ApiError } = require('../core/http');
 const { tx, now } = require('../core/db');
-const { audit, randomCode } = require('../core/auth');
+const { audit, randomCode, verifyManagerCredential } = require('../core/auth');
 
 const SELL = ['cashier', 'manager', 'admin'];
-const MANAGERS = ['manager', 'admin'];
 const DAY_MS = (24 * 3600 * 1000);
 
 function bad(code, message) {
@@ -317,8 +316,9 @@ function finalizeOrder(db, ctx, orderId, payments) {
 }
 
 // Full refund: paid -> refunded, tickets void, capacity released, negative payment
-// rows (net of change), refunded_at, audit.
-function refundOrder(db, ctx, orderId, userId) {
+// rows (net of change), refunded_at, audit. approverId attributes the manager who
+// approved the refund (may equal userId when a manager runs their own session).
+function refundOrder(db, ctx, orderId, userId, approverId) {
   return tx(db, () => {
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     if (!order) throw new ApiError(404, 'not_found', `No order ${orderId}`);
@@ -354,6 +354,7 @@ function refundOrder(db, ctx, orderId, userId) {
     audit(db, userId ?? null, 'pos.order.refund', {
       order_id: orderId, confirmation: order.confirmation,
       total_cents: order.total_cents, voided_tickets: voided,
+      approved_by: approverId ?? null,
     });
     return { order: getOrderDetail(db, orderId), voided_tickets: voided };
   });
@@ -404,24 +405,29 @@ function mount(router, ctx) {
     finalizeOrder(db, ctx, Number(req.params.id), req.body?.payments)
   );
 
-  // Void an unpaid (open) order — managers only.
-  router.post('/api/pos/orders/:id/void', MANAGERS, (req) =>
-    tx(db, () => {
+  // Void an unpaid (open) order — any seller, with manager re-auth: the body
+  // must carry approver {username, password} resolving to an active manager or
+  // admin. The credential is verified (and counts toward the approver's lockout)
+  // before the transaction opens; the password itself is never logged.
+  router.post('/api/pos/orders/:id/void', SELL, (req) => {
+    const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
+    return tx(db, () => {
       const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id));
       if (!order) throw new ApiError(404, 'not_found', `No order ${req.params.id}`);
       if (order.status !== 'open') {
         throw new ApiError(409, 'not_voidable', `Only open orders can be voided (order is ${order.status})`);
       }
       db.prepare("UPDATE orders SET status = 'void' WHERE id = ?").run(order.id);
-      audit(db, req.user.id, 'pos.order.void', { order_id: order.id });
+      audit(db, req.user.id, 'pos.order.void', { order_id: order.id, approved_by: approver.id });
       return { order: getOrderDetail(db, order.id) };
-    })
-  );
+    });
+  });
 
-  // Full refund of a paid order — managers only.
-  router.post('/api/pos/orders/:id/refund', MANAGERS, (req) =>
-    refundOrder(db, ctx, Number(req.params.id), req.user.id)
-  );
+  // Full refund of a paid order — any seller, with the same manager re-auth.
+  router.post('/api/pos/orders/:id/refund', SELL, (req) => {
+    const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
+    return refundOrder(db, ctx, Number(req.params.id), req.user.id, approver.id);
+  });
 }
 
 module.exports = { mount, createOrder, finalizeOrder, refundOrder };
