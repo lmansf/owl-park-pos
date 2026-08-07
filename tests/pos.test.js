@@ -6,6 +6,8 @@ const path = require('node:path');
 const os = require('node:os');
 
 const { createApp } = require('../server/main');
+const { openDb, migrate } = require('../server/core/db');
+const { seed: seedDemo } = require('../server/core/seed');
 const eventsMod = require('../server/modules/events');
 
 function tempDb() {
@@ -278,6 +280,119 @@ test('pos: pricing, posting path, tenders, void/refund', async (t) => {
     assert.ok(gainDays > 364 && gainDays < 366, `expected ~365 more days, got ${gainDays}`);
   });
 
+  await t.test('renewal consumes member_id column — description is display-only', async () => {
+    const r0 = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: memExp.id, qty: 1 }],
+      customer: { name: 'Col Umn', email: 'col@example.com' },
+    });
+    const fin0 = await cashier('POST', `/api/pos/orders/${r0.data.order.id}/finalize`, {
+      payments: [{ method: 'card_sim', amount_cents: r0.data.order.total_cents }],
+    });
+    const m = fin0.data.members[0];
+
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: memExp.id, qty: 1, member: { member_id: m.id } }],
+    });
+    const o = r.data.order;
+    assert.equal(o.lines[0].member_id, m.id); // structured column written at line add
+    // garble the display text — finalize must not care what it says
+    db.prepare("UPDATE order_lines SET description = 'Garbage text' WHERE id = ?")
+      .run(o.lines[0].id);
+    const fin = await cashier('POST', `/api/pos/orders/${o.id}/finalize`, {
+      payments: [{ method: 'card_sim', amount_cents: o.total_cents }],
+    });
+    assert.equal(fin.status, 200);
+    assert.equal(fin.data.members[0].id, m.id); // same member renewed
+  });
+
+  await t.test('new member from member_intent: line email wins; line gets stamped', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [
+        { product_id: memExp.id, qty: 1, member: { name: 'Gift Kid', email: 'kid@example.com' } },
+      ],
+      customer: { name: 'Buyer One', email: 'buyer1@example.com' },
+    });
+    const fin = await cashier('POST', `/api/pos/orders/${r.data.order.id}/finalize`, {
+      payments: [{ method: 'card_sim', amount_cents: r.data.order.total_cents }],
+    });
+    assert.equal(fin.status, 200);
+    const m = fin.data.members[0];
+    assert.equal(m.name, 'Gift Kid');
+    assert.equal(m.email, 'kid@example.com'); // NOT the order email
+    // finalize stamped the minted member back onto the line (joinable for reports)
+    const detail = await cashier('GET', `/api/pos/orders/${r.data.order.id}`);
+    assert.equal(detail.data.order.lines[0].member_id, m.id);
+  });
+
+  await t.test('intent with empty email suppresses the order-email fallback', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: memExp.id, qty: 1, member: { name: 'No Mail', email: '' } }],
+      customer: { name: 'Buyer Two', email: 'buyer2@example.com' },
+    });
+    const fin = await cashier('POST', `/api/pos/orders/${r.data.order.id}/finalize`, {
+      payments: [{ method: 'card_sim', amount_cents: r.data.order.total_cents }],
+    });
+    const m = fin.data.members[0];
+    assert.equal(m.name, 'No Mail');
+    assert.equal(m.email, ''); // parity with the legacy "(for Name)" no-email path
+  });
+
+  await t.test('regression: product named with the legacy suffix cannot hijack renewals', async () => {
+    const before = db.prepare('SELECT name FROM products WHERE id = ?').get(memExp.id).name;
+    db.prepare("UPDATE products SET name = 'Trap (renewal #1)' WHERE id = ?").run(memExp.id);
+    try {
+      const r = await cashier('POST', '/api/pos/orders', {
+        lines: [{ product_id: memExp.id, qty: 1 }],
+        customer: { name: 'Fresh Face', email: 'fresh@example.com' },
+      });
+      const fin = await cashier('POST', `/api/pos/orders/${r.data.order.id}/finalize`, {
+        payments: [{ method: 'card_sim', amount_cents: r.data.order.total_cents }],
+      });
+      assert.equal(fin.status, 200);
+      const m = fin.data.members[0];
+      assert.notEqual(m.id, 1); // did NOT renew member 1
+      assert.equal(m.email, 'fresh@example.com'); // fresh member from the order email
+    } finally {
+      db.prepare('UPDATE products SET name = ? WHERE id = ?').run(before, memExp.id);
+    }
+  });
+
+  await t.test('qty=2 membership line posts one member with doubled duration', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [
+        { product_id: memExp.id, qty: 2, member: { name: 'Twice Over', email: 'twice@example.com' } },
+      ],
+    });
+    const fin = await cashier('POST', `/api/pos/orders/${r.data.order.id}/finalize`, {
+      payments: [{ method: 'card_sim', amount_cents: r.data.order.total_cents }],
+    });
+    assert.equal(fin.data.members.length, 2); // one entry per unit…
+    assert.equal(fin.data.members[1].id, fin.data.members[0].id); // …same member
+    const gainDays = (Date.parse(fin.data.members[1].expires_at) - Date.now()) / (24 * 3600 * 1000);
+    assert.ok(gainDays > 729 && gainDays < 731, `expected ~730 days, got ${gainDays}`);
+  });
+
+  await t.test('member_intent is server-written only; oversized names are capped', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [
+        {
+          product_id: memExp.id,
+          qty: 1,
+          member_intent: '{"name":"Mallory","email":"mallory@example.com"}', // must be ignored
+          member: { name: 'A'.repeat(10000), email: 'big@example.com' },
+        },
+      ],
+      customer: { name: 'Buyer Three', email: 'buyer3@example.com' },
+    });
+    assert.equal(r.status, 200);
+    const line = db
+      .prepare('SELECT member_intent FROM order_lines WHERE order_id = ?')
+      .get(r.data.order.id);
+    const intent = JSON.parse(line.member_intent);
+    assert.equal(intent.email, 'big@example.com'); // not the injected JSON
+    assert.equal(intent.name.length, 200); // capped
+  });
+
   await t.test('double-finalize is rejected', async () => {
     const r = await cashier('POST', '/api/pos/orders', {
       lines: [{ product_id: adult.id, qty: 1 }],
@@ -516,4 +631,68 @@ test('pos: shared posting path is callable by other modules (store contract)', a
     { method: 'card_sim', amount_cents: order2.total_cents },
   ]);
   assert.match(result2.order.confirmation, /^W-[A-Z0-9]{9}$/);
+});
+
+test('pos: member-order-lines migration backfills legacy descriptions', async (t) => {
+  // Stage a pre-change DB: apply every migration EXCEPT member-order-lines, write
+  // rows in the legacy text encoding, then boot the app so the real migration runs.
+  const dbPath = tempDb();
+  const migrationsDir = path.join(__dirname, '..', 'server', 'migrations');
+  const partialDir = fs.mkdtempSync(path.join(os.tmpdir(), 'op-mig-'));
+  for (const f of fs.readdirSync(migrationsDir)) {
+    if (!f.includes('member-order-lines')) {
+      fs.copyFileSync(path.join(migrationsDir, f), path.join(partialDir, f));
+    }
+  }
+  const staged = openDb(dbPath);
+  migrate(staged, partialDir);
+  seedDemo(staged); // seed now, on the OLD schema, so createApp skips it later
+  const memProdId = staged.prepare("SELECT id FROM products WHERE sku = 'MEM-EXP'").get().id;
+  staged.exec(`
+    INSERT INTO products (id, sku, name, kind, price_cents, tax_group_id)
+      VALUES (501, 'LEG-TIX', 'Trap Ticket (renewal #507)', 'ticket', 1000, 1);
+    INSERT INTO members (id, member_no, name, email, program_id, pass_code, joined_at, expires_at)
+      VALUES (507, 'GM-LEGACY1', 'Renata Renewal', 'renata@example.com', 1,
+              'M-LEGACY0001', '2025-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    INSERT INTO orders (id, channel, status, subtotal_cents, total_cents, created_at, paid_at)
+      VALUES (9000, 'pos', 'paid', 49500, 49500, '2025-06-01T00:00:00.000Z', '2025-06-01T00:00:01.000Z');
+    INSERT INTO order_lines (id, order_id, product_id, description, qty, unit_price_cents, line_total_cents)
+      VALUES
+      (9001, 9000, ${memProdId}, 'Explorer Annual Membership (renewal #507)', 1, 9900, 9900),
+      (9002, 9000, ${memProdId}, 'Explorer Annual Membership (renewal #999)', 1, 9900, 9900),
+      (9003, 9000, ${memProdId}, 'Explorer Annual Membership (for Pat Smith <pat@example.com>)', 1, 9900, 9900),
+      (9004, 9000, ${memProdId}, 'Explorer Annual Membership (for Pat Smith)', 1, 9900, 9900),
+      (9005, 9000, ${memProdId}, 'Explorer Annual Membership', 1, 9900, 9900),
+      (9006, 9000, 501, 'Trap Ticket (renewal #507)', 1, 1000, 1000);
+    INSERT INTO orders (id, channel, status, subtotal_cents, total_cents, created_at)
+      VALUES (9010, 'pos', 'open', 9900, 9900, '2025-06-02T00:00:00.000Z');
+    INSERT INTO order_lines (id, order_id, product_id, description, qty, unit_price_cents, line_total_cents)
+      VALUES (9011, 9010, ${memProdId}, 'Explorer Annual Membership (renewal #507)', 1, 9900, 9900);
+  `);
+  staged.close();
+
+  const { server, db, ctx } = createApp(dbPath); // applies the member-order-lines migration
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const get = (id) =>
+    db.prepare('SELECT member_id, member_intent FROM order_lines WHERE id = ?').get(id);
+  assert.equal(get(9001).member_id, 507); // renewal -> member_id
+  assert.deepEqual({ ...get(9002) }, { member_id: null, member_intent: null }); // no member 999
+  assert.equal(get(9003).member_id, null);
+  assert.deepEqual(JSON.parse(get(9003).member_intent), {
+    name: 'Pat Smith', email: 'pat@example.com',
+  });
+  assert.deepEqual(JSON.parse(get(9004).member_intent), { name: 'Pat Smith', email: '' });
+  assert.deepEqual({ ...get(9005) }, { member_id: null, member_intent: null }); // plain: NULL, never guess
+  assert.deepEqual({ ...get(9006) }, { member_id: null, member_intent: null }); // non-membership untouched
+
+  // Open-order upgrade path: a pre-migration open renewal finalizes with the new
+  // code and still renews the right member (via the backfilled column).
+  const result = ctx.modules.pos.finalizeOrder(db, ctx, 9010, [
+    { method: 'cash', amount_cents: 9900 },
+  ]);
+  assert.equal(result.members.length, 1);
+  assert.equal(result.members[0].id, 507);
+  assert.ok(Date.parse(result.members[0].expires_at) > Date.parse('2026-01-01T00:00:00.000Z'));
 });

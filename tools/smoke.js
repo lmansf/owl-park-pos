@@ -141,6 +141,8 @@ async function main() {
   const renewed = renewFin.data.members[0];
   ok(renewed.id === member.id, 'renewal kept the same member record');
   ok(new Date(renewed.expires_at) > new Date(member.expires_at), 'renewal extended expiry');
+  const renewDetail = await cashier('GET', `/api/pos/orders/${renew.data.order.id}`);
+  ok(renewDetail.data.order.lines[0].member_id === member.id, 'renewal line stamped with member_id');
   const memberScan = await gate('POST', '/api/admissions/scan', { code: guestPass.pass_code, gate: 'main' });
   ok(memberScan.data.result === 'ok', 'member pass admits');
 
