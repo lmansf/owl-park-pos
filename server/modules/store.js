@@ -7,6 +7,11 @@ const { ApiError } = require('../core/http');
 const { tx } = require('../core/db');
 const { randomCode } = require('../core/auth');
 
+// Guest name/email are stored on the order, copied into holder_name on EVERY
+// issued ticket and echoed back in the guest view — an uncapped name is a ~1000x
+// amplifier on an anonymous route. Same cap pos.createOrder enforces on the way in.
+const CUSTOMER_MAX = 200;
+
 function bad(code, message) {
   return new ApiError(400, code, message);
 }
@@ -121,12 +126,21 @@ function guestOrderView(db, order) {
     }
     if (member && !seen.has(member.id)) {
       seen.add(member.id);
+      // Second gate — the credential itself. The order email is UNVERIFIED guest
+      // input, so an email match is not proof of ownership: anyone who knows a
+      // member's address could otherwise buy a renewal for it and be handed that
+      // member's gate credential and legal name. Only a member this very order
+      // minted shows its pass code and name; a pre-existing member the order
+      // renewed is acknowledged by member number and new expiry only (the holder
+      // already carries their pass card).
+      const minted = Date.parse(member.joined_at) >= Date.parse(order.created_at);
       members.push({
         member_no: member.member_no,
-        name: member.name,
-        pass_code: member.pass_code,
+        name: minted ? member.name : order.customer_name,
+        pass_code: minted ? member.pass_code : '',
         expires_at: member.expires_at,
         status: member.status,
+        ...(minted ? {} : { renewal: true }),
       });
     }
   }
@@ -205,7 +219,11 @@ function mount(router, ctx) {
     const name = String(b.customer?.name || '').trim();
     const email = String(b.customer?.email || '').trim();
     if (!name) throw bad('name_required', 'Please enter your name');
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    // rejected, not truncated: a silently shortened email would break order lookup
+    if (name.length > CUSTOMER_MAX) {
+      throw bad('name_too_long', `Name must be at most ${CUSTOMER_MAX} characters`);
+    }
+    if (email.length > CUSTOMER_MAX || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       throw bad('email_required', 'Please enter a valid email address');
     }
     const cardDigits = checkCard(b.card);
@@ -222,13 +240,18 @@ function mount(router, ctx) {
         },
         'web'
       );
-      return ctx.modules.pos.finalizeOrder(db, ctx, order.id, [
-        {
-          method: 'card_sim',
-          amount_cents: order.total_cents,
-          ref: 'CARD-' + cardDigits.slice(-4),
-        },
-      ]);
+      // A 100%-discounted cart legitimately prices to zero; finalizeOrder rejects
+      // any payment row of 0 (and needs none — sum 0 covers a 0 total), so the
+      // tender is skipped rather than sent as a zero-amount card charge. Same
+      // rules as POS, which already finalizes a zero-total order with no payments.
+      const tenders = order.total_cents > 0
+        ? [{
+            method: 'card_sim',
+            amount_cents: order.total_cents,
+            ref: 'CARD-' + cardDigits.slice(-4),
+          }]
+        : [];
+      return ctx.modules.pos.finalizeOrder(db, ctx, order.id, tenders);
     });
 
     return {
