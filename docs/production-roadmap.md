@@ -45,13 +45,16 @@ Simulated card tender today. An SMB needs:
 One SQLite file today; hosted demo is intentionally ephemeral.
 
 - Scheduled backups (SQLite online backup API), tested restore, offsite copy;
-  WAL checkpointing policy.
+  WAL checkpointing policy. (shipped: `backups-ops` — scheduled + manual snapshots,
+  offline restore tool, checkpoint after every snapshot; offsite copy stays an
+  operator task, see the user-guide runbook)
 - Either commit to single-host SQLite (fine for one venue; document the operational
   envelope) or plan a Postgres migration path for multi-venue.
 - Crash-safe printing/ticket issuance: idempotent finalize retries (order posting is
   already transactional — extend with client idempotency keys).
 - Monitoring: health endpoint exists (`/api/health`); add structured logs, error
-  alerting, disk-space watchdog.
+  alerting, disk-space watchdog. (shipped: `backups-ops` — JSON-per-line logs and a
+  low-disk health field + shell banner; error alerting still open)
 - Upgrade story: versioned releases, migration dry-run against a backup, rollback plan.
 
 ## 4. Hardware

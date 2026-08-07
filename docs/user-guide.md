@@ -157,8 +157,8 @@ online show the printable pass card on the confirmation page.
 
 ## Backup and restore runbook
 
-- **Where snapshots live:** `data/backups/owlpark-<timestamp>-<scheduled|manual>.db`,
-  file mode 0600. Each snapshot is the complete database (including staff password hashes
+- **Where snapshots live:** `data/backups/owlpark-<timestamp>-<scheduled|manual>.db`
+  (directory overridable via env `OWLPOS_BACKUP_DIR`), file mode 0600. Each snapshot is the complete database (including staff password hashes
   and member emails) — copy the folder offsite regularly (`rsync data/backups/ …`) and
   treat the copies as sensitive.
 - **Taking one:** the Backups page (**Back up now**) or wait for the scheduler. Tune with
