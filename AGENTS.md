@@ -14,10 +14,13 @@ forced password change, `tools/users.js` account admin; spec:
   DBs and ephemeral ports — never bind 4650 in tests.
 - Hard constraint: ZERO npm dependencies and zero network at runtime. Node 22 built-ins only
   (`node:http`, `node:sqlite`, `node:crypto`). Frontend is vanilla JS; no CDN/fonts/assets.
-- Architecture + frozen cross-module contracts (module export signatures, API shapes, code
-  formats, who owns which files): `openspec/changes/archive/2026-08-07-pos-mvp/design.md`.
-  Current per-system specs live in `openspec/specs/`. All DDL lives in
-  `server/migrations/` (core-owned); modules write no DDL.
+- Live contracts (module export signatures, API shapes, code formats, who owns which
+  files): `openspec/specs/<system>/spec.md` — one folder per system, and the only
+  authority. `openspec/changes/archive/` holds the original design docs as history:
+  useful for the why, but its signatures have drifted (it still shows
+  `posting.finalizeOrder(db, orderId, payments)`), so never treat it as current. When
+  code and a spec disagree, fix one of them — don't add a third source of truth. All DDL
+  lives in `server/migrations/` (core-owned); modules write no DDL.
 - Two invariant chokepoints: `pos.finalizeOrder` (the only path that marks orders paid,
   issues tickets, moves session capacity — POS and web store both use it) and
   `admissions.checkCode` (the only admit/deny path; always writes an `admits` row).
