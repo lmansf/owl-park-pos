@@ -18,7 +18,12 @@ function bad(message) {
 }
 
 function toInt(v, field, { min = null } = {}) {
-  const n = Number(v);
+  // Strict: only real numbers or non-empty numeric strings. Number() alone
+  // coerces null->0, true->1, [7]->7 — all of those must 400, not pass.
+  const n =
+    typeof v === 'number' ? v
+      : typeof v === 'string' && v.trim() !== '' ? Number(v)
+        : NaN;
   if (!Number.isInteger(n)) throw bad(`${field} must be an integer`);
   if (min !== null && n < min) throw bad(`${field} must be >= ${min}`);
   return n;
@@ -26,6 +31,106 @@ function toInt(v, field, { min = null } = {}) {
 
 function toBit(v) {
   return v === 0 || v === false || v === '0' ? 0 : 1;
+}
+
+// --- html sanitiser ---------------------------------------------------------------
+//
+// html sections render UNESCAPED into the guest store page, which is served from
+// the same origin as the back office — so a section body must never be able to
+// script (a manager-authored <img onerror=…> would run with any staff viewer's
+// session). Sanitised on write AND on read (getLayout), so rows stored before
+// this guard existed are cleaned too. Allowlist re-serialisation: only known
+// content tags survive, attributes are rebuilt from an allowlist with entity-
+// decoded, scheme-checked URLs, everything else (comments, unknown tags, stray
+// '<') is dropped or escaped. No script/style/iframe/svg/math/form, ever.
+
+const SAFE_TAGS = new Set([
+  'a', 'abbr', 'b', 'blockquote', 'br', 'caption', 'code', 'dd', 'div', 'dl', 'dt',
+  'em', 'figcaption', 'figure', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i',
+  'img', 'li', 'mark', 'ol', 'p', 'pre', 'q', 's', 'small', 'span', 'strong',
+  'sub', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul',
+]);
+const SAFE_ATTRS = new Set([
+  'alt', 'class', 'colspan', 'height', 'href', 'id', 'rowspan', 'src', 'style',
+  'title', 'width',
+]);
+const URL_ATTRS = new Set(['href', 'src']);
+
+const NAMED_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+
+// Decode entities so a scheme can't hide behind &#106;avascript: — checks run
+// on the decoded value and the output is re-escaped from that decoded form.
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&#x([0-9a-f]+);?/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);?/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&([a-z]+);/gi, (m, n) => NAMED_ENTITIES[n.toLowerCase()] ?? m);
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Allow relative URLs and http/https/mailto/tel plus inline data images.
+// Browsers strip control chars/whitespace inside URLs, so the scheme probe does too.
+function safeUrl(decoded) {
+  const probe = decoded.replace(/[\u0000-\u0020]/g, '');
+  const m = /^([a-z][a-z0-9+.-]*):/i.exec(probe);
+  if (!m) return true; // relative / fragment / query
+  const scheme = m[1].toLowerCase();
+  if (['http', 'https', 'mailto', 'tel'].includes(scheme)) return true;
+  return scheme === 'data' && /^data:image\/(?:png|gif|jpe?g|webp);/i.test(probe);
+}
+
+const TAG_RE = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s+[a-zA-Z][\w-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'`<>=]+))?)*)\s*\/?>/y;
+const ATTR_RE = /([a-zA-Z][\w-]*)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'`<>=]+))?/g;
+
+function sanitizeAttrs(raw) {
+  let out = '';
+  ATTR_RE.lastIndex = 0;
+  for (const m of raw.matchAll(ATTR_RE)) {
+    const name = m[1].toLowerCase();
+    if (!SAFE_ATTRS.has(name) || name.startsWith('on')) continue;
+    if (m[2] === undefined) { out += ` ${name}`; continue; }
+    const quoted = /^["']/.test(m[2]) ? m[2].slice(1, -1) : m[2];
+    const value = decodeEntities(quoted);
+    if (URL_ATTRS.has(name) && !safeUrl(value)) continue;
+    if (name === 'style' && /expression\s*\(|javascript:/i.test(value)) continue;
+    out += ` ${name}="${escapeHtml(value)}"`;
+  }
+  return out;
+}
+
+function sanitizeHtml(html) {
+  const src = String(html);
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const lt = src.indexOf('<', i);
+    if (lt === -1) { out += src.slice(i); break; }
+    out += src.slice(i, lt);
+    if (src.startsWith('<!--', lt)) {          // comment: drop whole thing
+      const end = src.indexOf('-->', lt + 4);
+      i = end === -1 ? src.length : end + 3;
+      continue;
+    }
+    if (src[lt + 1] === '!' || src[lt + 1] === '?') { // doctype/PI: drop to '>'
+      const end = src.indexOf('>', lt);
+      i = end === -1 ? src.length : end + 1;
+      continue;
+    }
+    TAG_RE.lastIndex = lt;
+    const m = TAG_RE.exec(src);
+    if (!m) { out += '&lt;'; i = lt + 1; continue; } // stray '<': escape it
+    i = TAG_RE.lastIndex;
+    const closing = m[1] === '/';
+    const tag = m[2].toLowerCase();
+    if (!SAFE_TAGS.has(tag)) continue;         // unknown/dangerous tag: dropped
+    out += closing ? `</${tag}>` : `<${tag}${sanitizeAttrs(m[3])}>`;
+  }
+  return out;
 }
 
 // --- settings -------------------------------------------------------------------
@@ -85,7 +190,7 @@ function sectionPayload(body, existing) {
   } else {
     const html = String(cfg.html ?? '');
     if (html.length > MAX_HTML) throw bad(`config.html is limited to ${MAX_HTML} characters`);
-    config = { html };
+    config = { html: sanitizeHtml(html) };
   }
 
   return {
@@ -145,7 +250,8 @@ function getLayout(db, ctx) {
         : [];
       sections.push({ ...base, products: (ids || []).map((id) => byId.get(id)).filter(Boolean) });
     } else if (row.kind === 'html') {
-      sections.push({ ...base, html: String(cfg.html ?? '') });
+      // re-sanitised on the way out too: covers rows stored before the guard
+      sections.push({ ...base, html: sanitizeHtml(String(cfg.html ?? '')) });
     }
     // any other kind (legacy 'hero' rows) is not part of the guest layout
   }
@@ -216,4 +322,4 @@ function mount(router, ctx) {
   });
 }
 
-module.exports = { mount, getLayout };
+module.exports = { mount, getLayout, sanitizeHtml };
