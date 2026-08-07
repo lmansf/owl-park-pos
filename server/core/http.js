@@ -21,6 +21,24 @@ class ApiError extends Error {
   }
 }
 
+// Shared request-body integer parsing: every builder module validates ints the
+// same way, so the rule lives here next to ApiError instead of being copied per
+// module (and drifting back to lenient).
+// Strict: only real numbers or non-empty numeric strings. Number() alone coerces
+// null->0, true->1, [7]->7, ''->0 — a PUT {price_cents: null} must 400, never
+// silently zero a price.
+function toInt(v, field, { min = null, max = null } = {}) {
+  const n =
+    typeof v === 'number' ? v
+      : typeof v === 'string' && v.trim() !== '' ? Number(v)
+        : NaN;
+  const bad = (msg) => new ApiError(400, 'bad_request', msg);
+  if (!Number.isInteger(n)) throw bad(`${field} must be an integer`);
+  if (min !== null && n < min) throw bad(`${field} must be >= ${min}`);
+  if (max !== null && n > max) throw bad(`${field} must be <= ${max}`);
+  return n;
+}
+
 function compile(pattern) {
   const keys = [];
   const regex = new RegExp(
@@ -220,4 +238,4 @@ function sendCSV(res, filename, rows) {
   }).end(body);
 }
 
-module.exports = { Router, ApiError, sendJSON, sendCSV };
+module.exports = { Router, ApiError, sendJSON, sendCSV, toInt };

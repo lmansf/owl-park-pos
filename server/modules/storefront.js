@@ -6,7 +6,7 @@
 // ctx.modules.catalog.getSellable(db,'web'), group membership via
 // ctx.modules.groups.productIdsInGroup — both presence-guarded so the module degrades
 // to an empty layout when siblings are absent (isolated tests, partial installs).
-const { ApiError } = require('../core/http');
+const { ApiError, toInt } = require('../core/http');
 const { audit } = require('../core/auth');
 
 const KINDS = ['products', 'groups', 'html'];
@@ -15,18 +15,6 @@ const MAX_HTML = 100_000;
 
 function bad(message) {
   return new ApiError(400, 'bad_request', message);
-}
-
-function toInt(v, field, { min = null } = {}) {
-  // Strict: only real numbers or non-empty numeric strings. Number() alone
-  // coerces null->0, true->1, [7]->7 — all of those must 400, not pass.
-  const n =
-    typeof v === 'number' ? v
-      : typeof v === 'string' && v.trim() !== '' ? Number(v)
-        : NaN;
-  if (!Number.isInteger(n)) throw bad(`${field} must be an integer`);
-  if (min !== null && n < min) throw bad(`${field} must be >= ${min}`);
-  return n;
 }
 
 function toBit(v) {

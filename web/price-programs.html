@@ -231,7 +231,16 @@
       renderEntries();
     }));
     tb.querySelectorAll('[data-price]').forEach((inp) => (inp.onchange = () => {
-      entries[Number(inp.dataset.price)].price_cents = Math.round(Number(inp.value) * 100);
+      const e = entries[Number(inp.dataset.price)];
+      const price = Number(inp.value);
+      // a cleared or junk field must not become a $0 override (the server 400s
+      // on the way out, but say so here instead of losing the saved price)
+      if (inp.value === '' || !Number.isFinite(price) || price < 0) {
+        op.toast('Enter an override price', 'err');
+        inp.value = (e.price_cents / 100).toFixed(2);
+        return;
+      }
+      e.price_cents = Math.round(price * 100);
     }));
 
     const used = new Set(entries.map((e) => e.product_id));

@@ -287,6 +287,28 @@ test('security: integer fields reject null/[]/true instead of coercing', async (
     title: 'X', kind: 'groups', config: { group_id: null },
   });
   assert.equal(s.status, 400);
+
+  // core/http.toInt is shared, so every builder that takes an integer inherits
+  // the rule — the price-program override is the one that spends money
+  const prog = (await manager('POST', '/api/pricing/programs', {
+    name: 'Coerce', starts_on: '2026-01-01', ends_on: '2099-12-31', priority: 1,
+  })).data.program;
+  const zeroed = await manager('PUT', `/api/pricing/programs/${prog.id}/entries`, {
+    entries: [{ product_id: adult.id, price_cents: null }],
+  });
+  assert.equal(zeroed.status, 400, 'a null override price must never post a $0 program price');
+  const group = (await manager('POST', '/api/groups', { name: 'Coerce' })).data.group;
+  assert.equal((await manager('PUT', `/api/groups/${group.id}/products`, {
+    product_ids: [true],
+  })).status, 400);
+  const page = (await manager('POST', '/api/menus/pages', { name: 'Coerce' })).data.page;
+  assert.equal((await manager('POST', `/api/menus/pages/${page.id}/buttons`, {
+    product_id: true,
+  })).status, 400);
+
+  // nothing priced at zero slipped through any of that
+  const feed = (await manager('GET', '/api/catalog/sellable?channel=pos')).data.products;
+  assert.ok(feed.every((p) => p.price_cents > 0), 'no product ended up free');
 });
 
 test('security: recent-scans feed masks scanned credentials', async (t) => {

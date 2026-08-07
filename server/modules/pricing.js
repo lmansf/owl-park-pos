@@ -2,13 +2,13 @@
 // pricing — price programs: date-ranged, prioritized per-product price overrides.
 //
 // resolvePrice(db, productId, atIso) is the frozen cross-team contract (see
-// openspec/changes/archive/2026-08-07-back-office-builders/design.md): pick the ACTIVE program whose
+// openspec/specs/price-programs/spec.md): pick the ACTIVE program whose
 // starts_on..ends_on (SERVER-LOCAL calendar days, inclusive on both ends) covers the
 // local day of atIso AND has an entry for the product. Highest priority wins; ties
 // break to the lowest program id. Returns {price_cents, program_id, program_name}
 // or null when no override applies. Phase-C wiring into the sellable feed and order
 // posting is the coordinator's job — this module only owns programs + entries.
-const { ApiError } = require('../core/http');
+const { ApiError, toInt } = require('../core/http');
 const { tx, now } = require('../core/db');
 const { audit } = require('../core/auth');
 
@@ -19,13 +19,8 @@ function bad(message) {
   return new ApiError(400, 'bad_request', message);
 }
 
-function toInt(v, field, { min = null, max = null } = {}) {
-  const n = Number(v);
-  if (!Number.isInteger(n)) throw bad(`${field} must be an integer`);
-  if (min !== null && n < min) throw bad(`${field} must be >= ${min}`);
-  if (max !== null && n > max) throw bad(`${field} must be <= ${max}`);
-  return n;
-}
+// Integers come from core/http's strict toInt: a cleared override price arrives as
+// null and must 400, never post a $0 program price.
 
 function toBit(v) {
   return v === 0 || v === false || v === '0' ? 0 : 1;

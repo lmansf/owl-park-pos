@@ -283,6 +283,28 @@ test('menus: validation', async (t) => {
     })).status, 404);
   });
 
+  await t.test('strict ints: true/[id]/{} never coerce into a ref or a position', async () => {
+    // Number(true) is 1 — a button "for product true" used to sell product #1.
+    for (const v of [true, [adult.id], {}]) {
+      assert.equal((await manager('POST', `/api/menus/pages/${page.id}/buttons`, {
+        product_id: v,
+      })).status, 400, `product_id ${JSON.stringify(v)} must be rejected`);
+      assert.equal((await manager('POST', `/api/menus/pages/${page.id}/buttons`, {
+        link_page_id: v,
+      })).status, 400, `link_page_id ${JSON.stringify(v)} must be rejected`);
+      assert.equal((await manager('POST', `/api/menus/pages/${page.id}/buttons`, {
+        product_id: adult.id, position: v,
+      })).status, 400, `position ${JSON.stringify(v)} must be rejected`);
+      assert.equal((await manager('POST', '/api/menus/pages', {
+        name: 'S', sort: v,
+      })).status, 400, `sort ${JSON.stringify(v)} must be rejected`);
+    }
+    const pages = (await manager('GET', '/api/menus/pages')).data.pages;
+    assert.ok(!pages.some((p) => p.name === 'S'), 'no page written by a rejected sort');
+    assert.deepEqual(pages.find((p) => p.id === page.id).buttons, [],
+      'no button written by a rejected ref');
+  });
+
   await t.test('position conflict -> 409; omitted position auto-appends', async () => {
     const a = await manager('POST', `/api/menus/pages/${page.id}/buttons`, { product_id: adult.id });
     assert.equal(a.status, 200);
