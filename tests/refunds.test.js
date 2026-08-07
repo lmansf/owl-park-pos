@@ -517,9 +517,16 @@ test('pos: session exchange — capacity-guarded void + reissue', async (t) => {
     assert.equal(eventsMod.getSession(db, sA.id).sold, before.a);
     assert.equal(eventsMod.getSession(db, sC.id).sold, before.c);
     assert.equal(db.prepare('SELECT status FROM tickets WHERE id = ?').get(plTickets[1].id).status, 'valid');
+    const before2 = db.prepare('SELECT status, uses_remaining FROM tickets WHERE id = ?')
+      .get(plTickets[1].id);
     const scan = await mgr('POST', '/api/admissions/scan', { code: plTickets[1].code });
     // still a live ticket (ok inside its window, wrong_session_time outside — never void)
     assert.notEqual(scan.data.reason, 'void');
+    // Inside the entry window that scan ADMITS and burns the use, which would
+    // leave the ticket 'used' for the subtests below; outside it changes nothing.
+    // Restore the pre-scan state so what follows does not depend on the clock.
+    db.prepare('UPDATE tickets SET status = ?, uses_remaining = ? WHERE id = ?')
+      .run(before2.status, before2.uses_remaining, plTickets[1].id);
   });
 
   await t.test('rejects: same session, cancelled session, other event, bad ids, wrong ticket state', async () => {
