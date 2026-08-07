@@ -30,6 +30,11 @@ and accounts SHALL lock for 15 minutes after 5 consecutive failures. All login f
 - **THEN** a signed session cookie is set, and `GET /api/auth/me` returns the
   user's name and role until logout, expiry (12h), or revocation.
 
+#### Scenario: Multi-instance login is not a loop
+- **WHEN** two server instances share `OWLPOS_SECRET` and a login on instance A is
+  followed by a request served by instance B
+- **THEN** instance B accepts the cookie without any shared session store.
+
 #### Scenario: Lockout does not leak
 - **WHEN** an account is locked after 5 consecutive failures and the correct password is
   then submitted
