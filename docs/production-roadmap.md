@@ -91,7 +91,8 @@ Explicitly out of scope in the demo; an SMB needs:
   exists), CAPTCHA/abuse throttling on checkout, GDPR-style data retention for
   customer/member PII, cookie/privacy pages.
 - Memberships: payment-on-file renewals are a large scope step — defer or make
-  renewal reminders email-only at first (builds on `member-order-lines`).
+  renewal reminders email-only at first (builds on the shipped `member-order-lines`
+  structured columns).
 
 ## 7. What to keep exactly as-is
 
