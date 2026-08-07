@@ -9,12 +9,12 @@
   .sb-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
   .sb-head h2 { margin: 0; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
-  @media (max-width: 560px) { .form-grid, .hero-grid { grid-template-columns: 1fr; } }
   .form-grid .full { grid-column: 1 / -1; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
   .table-wrap { overflow-x: auto; }
   td .op-btn { padding: 4px 10px; font-size: 13px; font-weight: 500; }
   .hero-grid { display: grid; grid-template-columns: 1fr 1fr 180px; gap: 0 16px; align-items: end; }
+  @media (max-width: 560px) { .form-grid, .hero-grid { grid-template-columns: 1fr; } }
   .accent-row { display: flex; gap: 8px; align-items: center; }
   .accent-row input[type="color"] { width: 44px; height: 34px; padding: 2px; }
   .prod-picker { max-height: 240px; overflow-y: auto; border: 1px solid rgba(128,128,128,.35); border-radius: 8px; padding: 8px 10px; }
