@@ -1,7 +1,10 @@
 # drawer-sessions Specification
 
 ## Purpose
-TBD - created by archiving change drawer-sessions-zreports. Update Purpose after archive.
+Cash-drawer sessions: per-cashier open-float, paid-in/out, blind-close lifecycle with
+over/short and sequential Z-reports; owns cash-method identification (`drawer.isCashMethod`)
+and the `payments.drawer_session_id` attribution that POS finalize and the drawers
+report consume.
 ## Requirements
 ### Requirement: Drawer lifecycle
 
