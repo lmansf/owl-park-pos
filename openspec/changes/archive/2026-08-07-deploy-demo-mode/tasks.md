@@ -8,5 +8,8 @@ Retro-spec: the code shipped in `960affb` and `06ef9eb`; these tasks only reconc
       sessions table retained-but-unused)
 - [x] A2 ADDED requirements: serverless entry + ephemeral demo mode, /api/health
       self-description, in-app Help page
-- [ ] A3 Verify scenarios against code (api/index.js, server/core/auth.js,
+- [x] A3 Verify scenarios against code (api/index.js, server/core/auth.js,
       server/main.js /api/health, web/help.html), then archive this change
+      (verified 2026-08-06: api/index.js /tmp DB + OWLPOS_DB + createApp dispatch;
+      auth.js HMAC-SHA256 + OWLPOS_SECRET fallback; /api/health ephemeral flag;
+      web/help.html served offline)
