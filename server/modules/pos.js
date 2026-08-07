@@ -293,7 +293,10 @@ function finalizeOrder(db, ctx, orderId, payments) {
     }
     const change = sum - order.total_cents;
     if (change > changeableSum) {
-      throw bad('bad_tender', 'Change cannot exceed cash tendered — reduce the card amount');
+      throw bad(
+        'bad_tender',
+        'Change cannot exceed the amount tendered in change-bearing tenders — reduce the non-change tender amounts'
+      );
     }
 
     const at = now();
