@@ -52,7 +52,12 @@ an existing member to renew. **Order search** (top of page) finds past orders by
 confirmation or customer; any seller can void open orders or refund paid ones — in full
 or per line: the refund dialog has a quantity stepper per line (**Select all** for the
 classic full refund), refunded tickets void and their session seats free up, and the
-money goes back to the original tenders. A partly refunded order shows a `partial
+money goes back to the original tenders. Refunded memberships stop working with the
+money: a membership the order created is suspended (a manager can reinstate it from
+Members if the refund was a mistake), a renewal gives back only the refunded extension —
+a toast at the register says which. Backing out of the tender dialog (cancel, Esc, or an
+error) quietly drops the just-created order, so an aborted sale never leaves a stray
+`open` order in search. A partly refunded order shows a `partial
 refund` badge and can be refunded again later. On the receipt, each still-valid session
 ticket stub offers **Exchange session** — move it to another upcoming session of the
 same event with seats left; the old stub voids and a replacement prints. Every void,
@@ -64,8 +69,12 @@ cash requires one — count your opening float and open the drawer first (if you
 the failed sale opens the dialog for you). Record paid-ins/paid-outs with a reason as
 they happen. At end of shift, count the till and **blind close**: you enter the counted
 total without seeing the expected amount; the printable Z-report then shows expected,
-counted, and over/short. Managers can force-close an abandoned drawer from the API and
-see every session under Reports → Drawer sessions.
+counted, and over/short. While your drawer is open, receipts you reprint hide that
+drawer's tender amounts ("hidden until drawer close") so the blind count stays honest —
+the full breakdown returns once the drawer closes, and a refund receipt always states
+the refunded total. Managers can force-close an abandoned drawer from the API and
+see every session under Reports → Drawer sessions, where still-open drawers are
+flagged first.
 
 ### Admissions (`/admissions.html`)
 The gate. The big input is keyboard-wedge friendly: scan or type a ticket (`T-…`) or
@@ -143,7 +152,9 @@ day and channel; net = gross − discounts), **Product mix**, **Admissions** (sc
 denials by reason, per gate), **Memberships** (sold/renewed, active, upcoming
 expirations), **Drawer sessions** (closed drawers by day: float, cash, paid in/out,
 expected vs counted, over/short — plus an "Unattributed POS cash" line that should stay
-at zero). Sales summary and Admissions also offer a **Group by: item group** toggle:
+at zero; any drawer still open is listed in a leading OPEN section whatever the date
+range, with float, payment count, and hours open but deliberately no expected cash, so
+its eventual close stays blind). Sales summary and Admissions also offer a **Group by: item group** toggle:
 totals roll up per group, products in no group land under **Ungrouped**, and products in
 multiple groups count in each group — the report footer discloses that group totals can
 therefore exceed the grand total. Member and unknown-code scans carry no product, so the

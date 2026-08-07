@@ -63,6 +63,19 @@ new membership to be created at finalize. `finalizeOrder` SHALL consume these co
 no code path SHALL parse member information out of the human-readable line description,
 which becomes display-only.
 
+One membership sold SHALL be one membership delivered: a line carrying `member_intent`
+(the POS new-member prompt, the gift path) ALWAYS mints its own member — even when an
+active member already carries that email — and only an explicit `member_id` renews. A
+bare line (no member info, buyer's own email) keeps the legacy renew-by-email match,
+but at most once per (program, email) per order, so further units mint fresh members
+instead of silently stacking duration onto the member the first unit just posted.
+
+#### Scenario: Two memberships to one email are two members
+- **WHEN** an order finalizes with two new-member membership units naming the same
+  household email
+- **THEN** two distinct members are minted, each with a single program duration — never
+  one member with doubled duration.
+
 #### Scenario: Renewal without text parsing
 - **WHEN** a renewal line is finalized for member #42
 - **THEN** the member's expiry extends based on `order_lines.member_id = 42`, regardless

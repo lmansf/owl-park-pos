@@ -89,9 +89,20 @@ that sums over/short but never Z numbers), plus an **Unattributed POS cash** lin
 history or refunds taken without an open drawer surface there visibly rather than
 silently.
 
+When any drawer session is still open, the report SHALL lead with an **OPEN drawer
+sessions** section listing every open session regardless of the date range (cashier,
+terminal, float, payment count, hours open) and naming the close route — but SHALL
+publish no expected cash or derived cash sum for them, preserving the blind-close
+discipline. With no open sessions the section is absent.
+
 #### Scenario: Park-day over/short
 - **WHEN** two drawers close in a day, one 50 cents short and one exactly balanced
 - **THEN** the report shows both rows and the totals line shows −50.
+
+#### Scenario: Abandoned till is not invisible
+- **WHEN** a drawer opened last week is still open and the report is run for today
+- **THEN** the OPEN sessions section lists it first, with float and payment count but
+  no expected-cash figure.
 
 #### Scenario: Legacy cash is visible
 - **WHEN** a pos-channel cash payment row carries no drawer attribution
