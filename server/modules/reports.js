@@ -238,7 +238,7 @@ function salesByGroupReport(db, groups, rng) {
             SUM(ol.tax_cents) AS tax_cents
      FROM order_lines ol
      JOIN orders o ON o.id = ol.order_id
-     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded')
+     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded', 'partial_refund')
      GROUP BY ol.product_id`
   ).all(rng.fromIso, rng.toIso);
   const rows = distributeByGroup(
@@ -447,7 +447,7 @@ function dashboard(db, groups) {
               SUM(ol.qty * ol.unit_price_cents - ol.discount_cents + ol.tax_cents) AS revenue_cents
        FROM order_lines ol
        JOIN orders o ON o.id = ol.order_id
-       WHERE o.paid_at >= ? AND o.status IN ('paid', 'refunded')
+       WHERE o.paid_at >= ? AND o.status IN ('paid', 'refunded', 'partial_refund')
        GROUP BY ol.product_id`
     ).all(dayStart);
     const rows = distributeByGroup(idx, perProduct, ['revenue_cents'],
