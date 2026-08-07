@@ -10,13 +10,16 @@ Demo-grade today by design: seeded well-known passwords, no lockout, no 2FA, HMA
 cookies with a per-process fallback secret, everything trusts localhost.
 
 - Forced password setup on first run; password policy + rotation; account lockout and
-  login rate-limiting; audit-visible failed logins.
+  login rate-limiting; audit-visible failed logins. (proposed: `security-hardening` —
+  all but a rotation schedule)
 - Mandatory `OWLPOS_SECRET` provisioning (fail closed if unset outside demo mode);
-  secret rotation story.
+  secret rotation story. (proposed: `security-hardening` — fail-closed; rotation open)
 - TLS everywhere (reverse proxy or built-in via `node:tls`), HSTS, secure cookies.
-- Role hardening: per-station gate accounts, manager-override PINs for voids/refunds
-  (attributed in audit), session revocation (stateless tokens need a denylist or
-  short-expiry + refresh design).
+  (`security-hardening` covers Secure/Strict cookies; TLS itself stays a proxy concern)
+- Role hardening: per-station gate accounts, manager-override credentials for
+  voids/refunds (attributed in audit — proposed: `security-hardening`), session
+  revocation (proposed: `security-hardening` via signed per-user token epochs, chosen
+  over a denylist because serverless demo instances have per-instance DBs).
 - Backup authentication for the back office if exposed beyond the LAN (VPN or IP
   allowlist; the store is the only surface that should ever be public).
 
