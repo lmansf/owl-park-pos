@@ -21,7 +21,7 @@
 // total = gross - discount + tax, so it balances against that event's negative
 // payment rows. Activity with no mapping posts to suspense account
 // 9999 "Unmapped" so it stays visible and the books still balance.
-const { ApiError, sendCSV } = require('../core/http');
+const { ApiError, sendCSV, toInt } = require('../core/http');
 const { tx } = require('../core/db');
 const { audit } = require('../core/auth');
 
@@ -328,18 +328,18 @@ function accountPayload(db, body, existing) {
 }
 
 function validateRefKey(db, scope, refKey, tenderMethods) {
-  const key = String(refKey ?? '').trim();
-  if (!key) throw bad('ref_key is required');
   if (scope === 'tender') {
+    const key = String(refKey ?? '').trim();
+    if (!key) throw bad('ref_key is required');
     if (!tenderMethods.includes(key)) {
       throw bad(`tender must be one of ${tenderMethods.join(', ')}`);
     }
     return key;
   }
   const table = { product: 'products', tax_group: 'tax_groups', discount: 'discounts' }[scope];
-  const n = Number(key);
-  if (!Number.isInteger(n) || n < 1 || !db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(n)) {
-    throw bad(`no ${scope} with id ${key}`);
+  const n = toInt(refKey, 'ref_key', { min: 1 });
+  if (!db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(n)) {
+    throw bad(`no ${scope} with id ${refKey}`);
   }
   return String(n);
 }
@@ -390,8 +390,8 @@ function mount(router, ctx) {
       audit(db, req.user.id, 'accounts.map.clear', { scope, ref_key: refKey });
       return { mapping: null };
     }
-    const accountId = Number(rawId);
-    if (!Number.isInteger(accountId) || !db.prepare('SELECT 1 FROM accounts WHERE id = ?').get(accountId)) {
+    const accountId = toInt(rawId, 'account_id', { min: 1 });
+    if (!db.prepare('SELECT 1 FROM accounts WHERE id = ?').get(accountId)) {
       throw bad(`no account with id ${rawId}`);
     }
     db.prepare(

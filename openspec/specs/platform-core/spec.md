@@ -324,7 +324,9 @@ or a non-empty numeric string SHALL be accepted; `null`, `undefined`, `true`, ar
 objects, and `''` SHALL be rejected with 400 `bad_request` rather than coerced (as
 `Number()` would, turning `null` into 0 and `true` into 1), and non-integers or values
 outside a field's declared min/max SHALL be rejected the same way. A rejected write SHALL
-leave stored data untouched.
+leave stored data untouched. One carve-out: cash-drawer money amounts (`checkCents` in
+`server/modules/drawer.js`) are deliberately stricter than the shared helper — they SHALL
+accept JSON numbers only, rejecting numeric strings along with every coercible shape.
 
 #### Scenario: A cleared price field cannot zero a price
 - **WHEN** a manager PUTs `{price_cents: null}` to a catalog product, or a price-program
