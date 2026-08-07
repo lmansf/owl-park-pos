@@ -51,6 +51,7 @@ function guestOrderView(db, order) {
     .prepare(
       `SELECT ol.id, ol.description, ol.qty, ol.unit_price_cents, ol.discount_cents,
               ol.tax_cents, ol.line_total_cents, ol.event_session_id, ol.member_id,
+              ol.member_intent,
               p.kind AS product_kind, p.name AS product_name, p.membership_program_id,
               s.starts_at AS session_starts_at, s.ends_at AS session_ends_at,
               e.name AS event_name
@@ -79,8 +80,9 @@ function guestOrderView(db, order) {
 
   // Membership lines: resolve the member the shared posting path created/renewed —
   // finalize stamps order_lines.member_id, so it is a plain join. Rows from before
-  // the member-order-lines migration may have no member_id; for those the order
-  // email was used, so look the member up by it.
+  // the member-order-lines migration may have no member_id; the backfilled
+  // member_intent email (the gift recipient on "(for ...)" lines) or, failing that,
+  // the order email identifies the member, so look it up by that.
   const members = [];
   const seen = new Set();
   for (const l of lines) {
@@ -88,13 +90,24 @@ function guestOrderView(db, order) {
     let member = null;
     if (l.member_id) {
       member = db.prepare('SELECT * FROM members WHERE id = ?').get(l.member_id);
-    } else if (order.customer_email) {
-      member = db
-        .prepare(
-          `SELECT * FROM members WHERE lower(email) = lower(?) AND program_id = ?
-           ORDER BY id LIMIT 1`
-        )
-        .get(String(order.customer_email).trim(), l.membership_program_id);
+    } else {
+      let email = '';
+      if (l.member_intent) {
+        try {
+          email = String(JSON.parse(l.member_intent).email || '').trim();
+        } catch {
+          email = '';
+        }
+      }
+      if (!email && order.customer_email) email = String(order.customer_email).trim();
+      if (email) {
+        member = db
+          .prepare(
+            `SELECT * FROM members WHERE lower(email) = lower(?) AND program_id = ?
+             ORDER BY id LIMIT 1`
+          )
+          .get(email, l.membership_program_id);
+      }
     }
     // Reveal gate: a pass (incl. its gate credential) is only shown when the member's
     // email matches the order email, or the member was minted by this very order —
@@ -118,7 +131,10 @@ function guestOrderView(db, order) {
     }
   }
   // internal member ids stay out of the guest view (pass cards carry member_no)
-  for (const l of lines) delete l.member_id;
+  for (const l of lines) {
+    delete l.member_id;
+    delete l.member_intent;
+  }
 
   return {
     id: order.id,

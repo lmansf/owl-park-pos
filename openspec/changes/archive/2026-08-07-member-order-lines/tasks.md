@@ -15,4 +15,4 @@
 
 ## Phase C — cleanup (serial)
 
-- [ ] C1 Remove the sharp-edge warning from CLAUDE.md; archive this change
+- [x] C1 Remove the sharp-edge warning from CLAUDE.md; archive this change
