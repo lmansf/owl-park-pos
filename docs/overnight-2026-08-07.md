@@ -6,16 +6,20 @@ merging each feature individually, swarming for parallelism, fully autonomous.
 
 ## Outcome in one line
 
-Fifteen PRs merged: ten features, three rounds of audit fixes, and two follow-ups.
-The suite went from 259 to 431 tests, all green, with the end-to-end smoke at 97 checks.
-The POS is materially closer to something a small venue could run — but three things
+Sixteen PRs merged: ten features, three rounds of audit fixes, two follow-ups, and one
+test de-flake. The suite went from 259 to 439 tests, all green, with the end-to-end smoke
+at 97 checks; main ends the night with eleven schema migrations and fifteen capability
+specs. The POS is materially closer to something a small venue could run — but six things
 only you can do still stand between it and a real till (see "Your steps").
 
 ## Shipped features (each: OpenSpec change → build → tests → gate → merge → archive)
 
-| # | Feature | What it gives the venue |
+Two spec PRs bookended the groundwork: PR 1 (OpenSpec expansion) established the main
+specs as the contract authority — 14 capabilities documented then, fifteen by the end of
+the night — and PR 3 archived the completed change docs. The ten feature PRs:
+
+| PR | Feature | What it gives the venue |
 | --- | --- | --- |
-| 1 | OpenSpec expansion | Main specs exist; 14 capabilities documented as the contract authority |
 | 2 | mobile-friendly | Every surface renders at iPhone width; verified page-by-page in a real browser |
 | 4 | security-hardening | Production mode, forced password rotation, lockout + rate limiting, session revocation, manager approval for voids/refunds |
 | 5 | backups-ops | Scheduled + on-demand SQLite snapshots, restore tool, structured logs, disk/backup health |
@@ -34,9 +38,11 @@ agent and then attacked by an independent verifier told to refute it; only survi
 fixed, and every fix carries a regression test proven to fail without it.
 
 - **Round 1**: 27 raised → 21 confirmed → all fixed (PR 13).
-- **Round 2** (over the fixed code): 23 raised → 17 confirmed → all fixed.
+- **Round 2** (over the fixed code): 23 raised → 17 confirmed → all fixed (PR 16).
 - **Follow-ups**: strict integer parsing unified into one shared helper; docs repointed at
   live specs (PR 15).
+- **Test de-flake**: the session-exchange suite failed intermittently because a gate scan
+  left shared ticket state mutated; PR 14 restores the state and stabilizes the suite.
 
 ### The findings that mattered most
 
@@ -80,13 +86,17 @@ fixed, and every fix carries a regression test proven to fail without it.
 
 ## Known follow-ups (logged, not blocking)
 
+Four were logged during the run; the last two were closed before it ended.
+
 - `membership.js` should expose an explicit "always create" option; `pos.js` currently
-  reaches that branch indirectly.
+  reaches that branch indirectly. Still open.
 - Membership reversal on refund writes member rows from `pos.js`; its proper home is a
-  `membership.revokeForRefund` export.
+  `membership.revokeForRefund` export. Still open.
 - A membership line with qty > 1 mints N members but `order_lines.member_id` stamps only
-  one — a link table would let the guest view and refund reversal see all of them.
-- Spec deltas for the new abandon route and membership-reversal-on-refund.
+  one — closed in the round-2 fixes: the `order_line_members` link table now records
+  every posted member, and the guest view and refund reversal read it.
+- Spec deltas for the new abandon route and membership-reversal-on-refund — closed in the
+  round-2 fixes alongside the code.
 
 ## Notes on how it ran
 
