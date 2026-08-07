@@ -2,21 +2,27 @@
 
 Requested by the captain during the 2026-08-06 OpenSpec review. This outlines the gap
 between the current demo and a system an SMB attraction could actually run. Items marked
-(proposed) already have an OpenSpec change under `openspec/changes/`.
+(proposed) already have an OpenSpec change under `openspec/changes/`; items marked
+(shipped) are implemented and archived under `openspec/changes/archive/`.
 
 ## 1. Security and auth — the biggest gap
 
-Demo-grade today by design: seeded well-known passwords, no lockout, no 2FA, HMAC
-cookies with a per-process fallback secret, everything trusts localhost.
+Demo mode stays demo-grade by design: seeded well-known passwords, a per-process
+fallback secret, everything trusts localhost. The shipped `security-hardening` change
+added an `OWLPOS_MODE=production` mode plus lockout, rate limiting, and session
+revocation in every mode; still no 2FA.
 
 - Forced password setup on first run; password policy + rotation; account lockout and
-  login rate-limiting; audit-visible failed logins.
+  login rate-limiting; audit-visible failed logins. (shipped: `security-hardening` —
+  all but a rotation schedule)
 - Mandatory `OWLPOS_SECRET` provisioning (fail closed if unset outside demo mode);
-  secret rotation story.
+  secret rotation story. (shipped: `security-hardening` — fail-closed; rotation open)
 - TLS everywhere (reverse proxy or built-in via `node:tls`), HSTS, secure cookies.
-- Role hardening: per-station gate accounts, manager-override PINs for voids/refunds
-  (attributed in audit), session revocation (stateless tokens need a denylist or
-  short-expiry + refresh design).
+  (`security-hardening` covers Secure/Strict cookies; TLS itself stays a proxy concern)
+- Role hardening: per-station gate accounts, manager-override credentials for
+  voids/refunds (attributed in audit — shipped: `security-hardening`), session
+  revocation (shipped: `security-hardening` via signed per-user token epochs, chosen
+  over a denylist because serverless demo instances have per-instance DBs).
 - Backup authentication for the back office if exposed beyond the LAN (VPN or IP
   allowlist; the store is the only surface that should ever be public).
 

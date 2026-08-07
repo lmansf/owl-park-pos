@@ -34,6 +34,11 @@ window.op = (() => {
       location.href = '/login.html?next=' + encodeURIComponent(location.pathname);
       throw new Error('unauthenticated');
     }
+    if (res.status === 403 && data?.error === 'password_change_required') {
+      // production mode: seeded accounts must set a real password before working
+      location.href = '/login.html?pw=1&next=' + encodeURIComponent(location.pathname);
+      throw new Error('password_change_required');
+    }
     if (!res.ok) {
       const msg = data?.message || `Request failed (${res.status})`;
       toast(msg, 'err');
@@ -88,7 +93,7 @@ window.op = (() => {
     bar.innerHTML = `
       <div class="op-brand">OWL PARK<small>point of sale</small></div>
       <nav class="op-nav">${links}</nav>
-      <div class="op-user">${esc(me.display_name)} · ${me.role}<button id="op-logout">Sign out</button></div>`;
+      <div class="op-user">${esc(me.display_name)} · ${me.role}<button id="op-passwd" title="Change password">Password</button><button id="op-logout">Sign out</button></div>`;
     document.body.prepend(bar);
     fetch('/api/health').then((r) => r.json()).then((h) => {
       if (!h.ephemeral) return;
@@ -100,6 +105,10 @@ window.op = (() => {
     document.getElementById('op-logout').onclick = async () => {
       await api('/api/auth/logout', { method: 'POST', body: {} });
       location.href = '/login.html';
+    };
+    document.getElementById('op-passwd').onclick = () => {
+      // login.html shows the change-password card directly for signed-in visitors
+      location.href = '/login.html?pw=1&next=' + encodeURIComponent(location.pathname);
     };
 
     // role gate: if this page isn't in the user's nav, bounce to their first page

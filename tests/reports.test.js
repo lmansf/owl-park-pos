@@ -116,7 +116,8 @@ test('reports: dashboard, four reports, CSV parity, reconciliation', async (t) =
     payments: [{ method: 'cash', amount_cents: o2.total_cents }],
   })).data;
   track(o2, f2.tickets.length);
-  const rf2 = await manager.call('POST', `/api/pos/orders/${o2.id}/refund`);
+  const rf2 = await manager.call('POST', `/api/pos/orders/${o2.id}/refund`,
+    { approver: { username: 'manager', password: 'manager' } });
   assert.equal(rf2.status, 200);
   expRefunds += 1;
   expRefundCents -= o2.total_cents;
@@ -272,7 +273,8 @@ test('reports: dashboard, four reports, CSV parity, reconciliation', async (t) =
     const f4 = (await cashier.call('POST', `/api/pos/orders/${o4.id}/finalize`, {
       payments: [{ method: 'cash', amount_cents: o4.total_cents }],
     })).data;
-    assert.equal((await manager.call('POST', `/api/pos/orders/${o4.id}/refund`)).status, 200);
+    assert.equal((await manager.call('POST', `/api/pos/orders/${o4.id}/refund`,
+      { approver: { username: 'manager', password: 'manager' } })).status, 200);
 
     const paidYesterday = new Date(Date.parse(f4.order.paid_at) - DAY).toISOString();
     app.db.prepare('UPDATE orders SET paid_at = ?, created_at = ? WHERE id = ?')

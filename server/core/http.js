@@ -40,10 +40,11 @@ function compile(pattern) {
 }
 
 class Router {
-  constructor({ webRoot, resolveUser }) {
+  constructor({ webRoot, resolveUser, guard }) {
     this.routes = [];
     this.webRoot = webRoot;
     this.resolveUser = resolveUser; // (req) => user row or null
+    this.guard = guard || null; // optional (req, pathname) hook after auth; may throw ApiError
   }
 
   // roles: null = public; [] = any signed-in user; ['admin',...] = restricted
@@ -77,6 +78,7 @@ class Router {
             if (route.roles.length && !route.roles.includes(req.user.role)) {
               throw new ApiError(403, 'forbidden', 'Your role cannot do this');
             }
+            if (this.guard) this.guard(req, pathname);
           } else {
             req.user = this.resolveUser(req); // best-effort for public routes
           }

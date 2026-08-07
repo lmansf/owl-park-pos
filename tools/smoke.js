@@ -145,8 +145,12 @@ async function main() {
   ok(memberScan.data.result === 'ok', 'member pass admits');
 
   console.log('— refund —');
-  const refund = await manager('POST', `/api/pos/orders/${order.id}/refund`, {});
-  ok(refund.status === 200, 'manager refunds the POS order');
+  const noApprover = await manager('POST', `/api/pos/orders/${order.id}/refund`, {});
+  ok(noApprover.status === 403, 'refund without manager re-auth is refused');
+  const refund = await manager('POST', `/api/pos/orders/${order.id}/refund`, {
+    approver: { username: 'manager', password: 'manager' },
+  });
+  ok(refund.status === 200, 'manager refunds the POS order (re-auth approved)');
   const sessAfterRefund = (await anon('GET', `/api/events/${plntm.event_id}/sessions`)).data.sessions.find((s) => s.id === sess.id);
   ok(sessAfterRefund.sold === soldBefore, 'refund released session capacity');
   const scanVoid = await gate('POST', '/api/admissions/scan', { code: adultTickets[1].code, gate: 'main' });
@@ -225,6 +229,27 @@ async function main() {
     assert.equal(t.dr, t.cr, `journal balances on ${day}`);
   }
   passed++; console.log('  ✔ journal debits equal credits every day');
+
+  console.log('— security: lockout, recovery, session revocation —');
+  let lockedOut = true;
+  for (let i = 0; i < 5; i++) {
+    const bad = await anon('POST', '/api/auth/login', { username: 'cashier', password: 'wrong' });
+    lockedOut = lockedOut && bad.status === 401;
+  }
+  ok(lockedOut, 'five bad logins all rejected with a generic 401');
+  const whileLocked = await anon('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+  ok(whileLocked.status === 401, 'locked account rejects even the correct password');
+  const failedAudits = db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'auth.login_failed'").get().n;
+  ok(failedAudits >= 5, 'failed logins are audit-visible');
+  db.prepare("UPDATE users SET locked_until = NULL, failed_logins = 0 WHERE username = 'cashier'").run();
+  const relogin = await as('cashier-again')('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+  ok(relogin.status === 200, 'clearing the lock restores login');
+
+  const mgr2 = as('manager-2');
+  ok((await mgr2('POST', '/api/auth/login', { username: 'manager', password: 'manager' })).status === 200, 'second manager session opens');
+  ok((await manager('POST', '/api/auth/revoke-sessions', {})).status === 200, 'manager revokes their sessions');
+  ok((await mgr2('GET', '/api/auth/me')).status === 401, 'the other manager session is dead after revoke');
+  ok((await manager('GET', '/api/auth/me')).status === 200, 'the revoking session continues on its fresh cookie');
 
   console.log(`\nSMOKE PASSED — ${passed} checks green.`);
   server.close();

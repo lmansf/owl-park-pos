@@ -310,12 +310,17 @@ test('pos: pricing, posting path, tenders, void/refund', async (t) => {
     assert.equal(eventsMod.getSession(db, s.id).sold, soldBefore + 1);
     const adultTicket = fin.data.tickets.find((x) => x.event_session_id === null);
 
-    // cashier cannot refund
+    // no approver credential → refused, regardless of role
     const deny = await cashier('POST', `/api/pos/orders/${o.id}/refund`, {});
     assert.equal(deny.status, 403);
+    assert.equal(deny.data.error, 'approval_required');
+    const denyMgr = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {});
+    assert.equal(denyMgr.status, 403);
 
-    // manager refunds
-    const ref = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {});
+    // manager refunds (their own credential as approver)
+    const ref = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {
+      approver: { username: 'manager', password: 'manager' },
+    });
     assert.equal(ref.status, 200);
     assert.equal(ref.data.order.status, 'refunded');
     assert.ok(ref.data.order.refunded_at);
@@ -336,26 +341,93 @@ test('pos: pricing, posting path, tenders, void/refund', async (t) => {
     assert.equal(scan.data.result, 'denied');
     assert.equal(scan.data.reason, 'void');
 
+    // refund audit row carries both the session user and the approver
+    const auditRow = db
+      .prepare("SELECT * FROM audit_log WHERE action = 'pos.order.refund' ORDER BY id DESC LIMIT 1")
+      .get();
+    const detail = JSON.parse(auditRow.detail);
+    assert.equal(detail.order_id, o.id);
+    const mgrId = db.prepare("SELECT id FROM users WHERE username = 'manager'").get().id;
+    assert.equal(detail.approved_by, mgrId);
+    assert.equal(auditRow.user_id, mgrId);
+
     // cannot refund twice
-    const again = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {});
+    const again = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {
+      approver: { username: 'manager', password: 'manager' },
+    });
     assert.equal(again.status, 409);
   });
 
-  await t.test('void: manager only, open orders only, cannot finalize after', async () => {
+  await t.test('void: manager approval, open orders only, cannot finalize after', async () => {
     const r = await cashier('POST', '/api/pos/orders', {
       lines: [{ product_id: adult.id, qty: 1 }],
     });
     const o = r.data.order;
+    const approver = { username: 'manager', password: 'manager' };
     assert.equal((await cashier('POST', `/api/pos/orders/${o.id}/void`, {})).status, 403);
-    const v = await mgr('POST', `/api/pos/orders/${o.id}/void`, {});
+    // cashier session + a manager's credential succeeds, audit attributes both
+    const v = await cashier('POST', `/api/pos/orders/${o.id}/void`, { approver });
     assert.equal(v.status, 200);
     assert.equal(v.data.order.status, 'void');
+    const voidAudit = db
+      .prepare("SELECT * FROM audit_log WHERE action = 'pos.order.void' ORDER BY id DESC LIMIT 1")
+      .get();
+    const vd = JSON.parse(voidAudit.detail);
+    assert.equal(vd.approved_by, db.prepare("SELECT id FROM users WHERE username = 'manager'").get().id);
+    assert.equal(voidAudit.user_id, db.prepare("SELECT id FROM users WHERE username = 'cashier'").get().id);
     const fin = await cashier('POST', `/api/pos/orders/${o.id}/finalize`, {
       payments: [{ method: 'cash', amount_cents: 99999 }],
     });
     assert.equal(fin.status, 409);
-    const rv = await mgr('POST', `/api/pos/orders/${o.id}/void`, {});
+    const rv = await mgr('POST', `/api/pos/orders/${o.id}/void`, { approver });
     assert.equal(rv.status, 409); // not voidable twice
+  });
+
+  await t.test('approver must be an active manager/admin with the right password', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: adult.id, qty: 1 }],
+    });
+    const o = r.data.order;
+    // gate role cannot approve, generic 403 either way
+    let deny = await cashier('POST', `/api/pos/orders/${o.id}/void`, {
+      approver: { username: 'gate', password: 'gate' },
+    });
+    assert.equal(deny.status, 403);
+    assert.equal(deny.data.error, 'approval_required');
+    // wrong password: same generic 403, no oracle
+    deny = await cashier('POST', `/api/pos/orders/${o.id}/void`, {
+      approver: { username: 'manager', password: 'wrong' },
+    });
+    assert.equal(deny.status, 403);
+    assert.equal(deny.data.error, 'approval_required');
+    assert.equal((await cashier('GET', `/api/pos/orders/${o.id}`)).data.order.status, 'open');
+  });
+
+  await t.test('approver attempts count toward the approver account lockout', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: adult.id, qty: 1 }],
+    });
+    const o = r.data.order;
+    // 4 more wrong attempts (one spent in the previous subtest) reach the 5-failure lock
+    for (let i = 0; i < 4; i++) {
+      const deny = await cashier('POST', `/api/pos/orders/${o.id}/void`, {
+        approver: { username: 'manager', password: 'still-wrong' },
+      });
+      assert.equal(deny.status, 403);
+    }
+    const locked = db.prepare("SELECT locked_until FROM users WHERE username = 'manager'").get();
+    assert.ok(locked.locked_until, 'manager account should be locked');
+    // even the correct approver password fails while locked
+    const stillDenied = await cashier('POST', `/api/pos/orders/${o.id}/void`, {
+      approver: { username: 'manager', password: 'manager' },
+    });
+    assert.equal(stillDenied.status, 403);
+    // unlock and the approval works again
+    db.prepare("UPDATE users SET locked_until = NULL, failed_logins = 0 WHERE username = 'manager'").run();
+    const ok = await cashier('POST', `/api/pos/orders/${o.id}/void`, {
+      approver: { username: 'manager', password: 'manager' },
+    });
+    assert.equal(ok.status, 200);
   });
 
   await t.test('scenario: reprint — order search + detail return lines, payments, tickets', async () => {

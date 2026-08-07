@@ -36,8 +36,9 @@ calculated) and/or simulated card; split tenders are fine. Finalizing shows the 
 and one printable stub per ticket, barcode included (browser print gives one ticket per
 page). Selling a **membership** prompts for the member's name/email, or search-and-attach
 an existing member to renew. **Order search** (top of page) finds past orders by
-confirmation or customer; managers can void open orders or refund paid ones (full refund:
-tickets void, seats released).
+confirmation or customer; any seller can void open orders or refund paid ones (full
+refund: tickets void, seats released), but each void/refund asks a manager or admin to
+type their own credentials as approval — the audit log records both people.
 
 ### Admissions (`/admissions.html`)
 The gate. The big input is keyboard-wedge friendly: scan or type a ticket (`T-…`) or
@@ -136,3 +137,12 @@ online show the printable pass card on the confirmation page.
   serverless function). The hosted database lives in `/tmp` and is intentionally
   ephemeral — a demo, not a system of record. Real payments and real hardware are out of
   scope by design.
+- **Production mode:** set `OWLPOS_MODE=production` and a strong `OWLPOS_SECRET`
+  (at least 32 bytes, e.g. 64 hex chars — the server refuses to start without one). In
+  this mode the seeded demo accounts must set a real password at first sign-in before
+  anything else works, session cookies are marked `Secure` (put the server behind
+  HTTPS), and the login page stops advertising demo credentials. In every mode, login is
+  rate-limited, five consecutive wrong passwords lock an account for 15 minutes (failed
+  attempts land in the audit log), voids/refunds require a manager to enter their own
+  credentials, and the Password button in the top bar changes your password — which also
+  signs out every other session for the account.
