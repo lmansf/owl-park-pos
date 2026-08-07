@@ -59,8 +59,12 @@ function tsName(d = new Date()) {
 // request param to fs.
 function safeSnapshotPath(backupDir, name) {
   if (typeof name !== 'string' || !NAME_RE.test(name)) return null;
-  const file = path.normalize(path.join(backupDir, name));
-  if (!file.startsWith(backupDir + path.sep)) return null;
+  // Resolve both sides so an unnormalized OWLPOS_BACKUP_DIR (trailing slash,
+  // relative path) can't break the containment check — the raw prefix would
+  // become "…//" and never match, 400ing every valid DELETE.
+  const dir = path.resolve(backupDir);
+  const file = path.resolve(dir, name);
+  if (!file.startsWith(dir + path.sep)) return null;
   return file;
 }
 

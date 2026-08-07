@@ -48,7 +48,8 @@ decision goes through one shared validation path (`admissions.checkCode`).
 
 Payments are simulated throughout, and in the default demo mode auth is demo-grade — do
 not expose demo mode beyond localhost. Setting `OWLPOS_MODE=production` hardens auth
-(fail-closed secret, forced password change for seeded accounts — see the deployment
-notes at the end of [docs/user-guide.md](docs/user-guide.md)); what still separates this
+(fail-closed `OWLPOS_SECRET` and `OWLPOS_BOOTSTRAP_ADMIN_PASSWORD`, no seeded demo
+credentials, forced password change, account activation via `tools/users.js` — see the
+deployment notes at the end of [docs/user-guide.md](docs/user-guide.md)); what still separates this
 from a real production deployment is outlined in
 [docs/production-roadmap.md](docs/production-roadmap.md).

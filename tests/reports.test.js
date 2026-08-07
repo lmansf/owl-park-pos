@@ -63,7 +63,9 @@ test('reports: dashboard, four reports, CSV parity, reconciliation', async (t) =
     const anon = await fetch(app.base + '/api/reports/dashboard');
     assert.equal(anon.status, 401);
     assert.equal((await cashier.call('GET', '/api/reports/sales')).status, 403);
-    assert.equal((await gate.call('GET', '/api/reports/dashboard')).status, 200);
+    assert.equal((await gate.call('GET', '/api/reports/dashboard')).status, 403,
+      'gate is admissions-only — no dashboard financials');
+    assert.equal((await cashier.call('GET', '/api/reports/dashboard')).status, 200);
     assert.equal((await manager.call('GET', '/api/reports/sales')).status, 200);
   });
 
@@ -475,7 +477,7 @@ test('reports: group rollups (sales, admissions, dashboard, CSV, security)', asy
       assert.equal((await cashier.raw(p + '&format=csv')).status, 403, `cashier 403 CSV ${p}`);
       assert.equal((await manager.call('GET', p)).status, 200, `manager 200 ${p}`);
     }
-    assert.equal((await gate.call('GET', '/api/reports/dashboard')).status, 200);
+    assert.equal((await gate.call('GET', '/api/reports/dashboard')).status, 403);
   });
 
   await t.test('security: group_by fuzz → 400 bad_param, no side effects, no stack', async () => {
@@ -507,14 +509,17 @@ test('reports: group rollups (sales, admissions, dashboard, CSV, security)', asy
     assert.ok(!csv.headers.get('content-disposition').includes('script'),
       'filename never carries user text');
 
-    // Formula-injection pin: sendCSV emits leading = raw (accepted: authoring needs
-    // manager/admin). If sendCSV ever starts prefixing, update this pin deliberately.
+    // Formula-injection pin: sendCSV neutralises a leading = with an apostrophe
+    // (OWASP CSV-injection guidance) — lower-privileged text like drawer reasons
+    // and gate names shares this writer, so every export gets the treatment.
     const gFormula = (await admin.call('POST', '/api/groups', { name: '=1+1', sort: 4 })).data.group;
     assert.equal((await admin.call('PUT', `/api/groups/${gFormula.id}/products`,
       { product_ids: [bySku.CHILD.id] })).status, 200);
     const csv2 = await manager.raw(`/api/reports/sales?${rangeQ}&group_by=group&format=csv`);
-    assert.ok(csv2.text.split('\n').some((l) => l.startsWith('=1+1,')),
-      'formula-like group name is emitted raw (pinned behavior)');
+    assert.ok(csv2.text.split('\n').some((l) => l.startsWith(`'=1+1,`)),
+      'formula-like group name is neutralised with a leading apostrophe (pinned behavior)');
+    assert.ok(!csv2.text.split('\n').some((l) => l.startsWith('=')),
+      'no cell opens with a live formula character');
   });
 
   await t.test('security: range cap still enforced in group mode', async () => {

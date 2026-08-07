@@ -136,6 +136,14 @@ function startOfTodayIso() {
   return d.toISOString();
 }
 
+// The recent feed is venue-wide and readable by every gate station, and member
+// pass codes are long-lived single-factor credentials — never hand the full
+// scanned code back out. Last 4 characters are plenty for the operator UI.
+function maskCode(code) {
+  const c = String(code || '');
+  return c.length <= 4 ? c : `${c.slice(0, 2)}…${c.slice(-4)}`;
+}
+
 function mount(router, ctx) {
   const { db } = ctx;
 
@@ -159,7 +167,7 @@ function mount(router, ctx) {
        LEFT JOIN products p ON p.id = t.product_id
        LEFT JOIN members m ON m.id = a.member_id
        ORDER BY a.id DESC LIMIT 10`
-    ).all();
+    ).all().map((a) => ({ ...a, code: maskCode(a.code) }));
     return { today_count, recent };
   });
 

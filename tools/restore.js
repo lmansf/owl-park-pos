@@ -52,34 +52,85 @@ function main() {
     fail(`snapshot schema is newer than this checkout (unknown migrations: ${unknown.join(', ')}) — update the code first`);
   }
 
-  // A recently-written WAL means the server is probably still running.
-  const wal = dbPath + '-wal';
-  if (fs.existsSync(wal) && Date.now() - fs.statSync(wal).mtimeMs < 10_000) {
-    if (!force) fail('the database WAL was written seconds ago — stop the server first (or pass --force)');
-    console.error('restore: WARNING — WAL is fresh; continuing because of --force');
+  // Restoring the target onto itself can only destroy it — refuse outright.
+  if (fs.existsSync(dbPath) && path.resolve(snapshot) === path.resolve(dbPath)) {
+    fail('snapshot and target are the same file — nothing to restore');
   }
 
-  // Preserve the current DB (and its sidecars, so a stale WAL can never be
-  // replayed over the restored file).
-  let preRestore = null;
-  if (fs.existsSync(dbPath)) {
-    preRestore = dbPath.replace(/\.db$/, '') + `-pre-restore-${tsName()}.db`;
-    fs.renameSync(dbPath, preRestore);
-    for (const ext of ['-wal', '-shm']) {
-      if (fs.existsSync(dbPath + ext)) fs.renameSync(dbPath + ext, preRestore + ext);
+  // Live-server refusal: SQLite keeps -wal/-shm sidecars beside the DB for as
+  // long as ANY connection is open, and removes them on the last clean close —
+  // so their presence means the server is still running (any write after this
+  // restore would be silently stranded in the pre-restore copy) or it crashed
+  // without cleaning up. Only --force, with a loud warning, may proceed; the
+  // crash-leftover case is exactly what --force exists for.
+  const sidecars = ['-wal', '-shm'].filter((ext) => fs.existsSync(dbPath + ext));
+  if (sidecars.length) {
+    const names = sidecars.map((ext) => path.basename(dbPath + ext)).join(' and ');
+    if (!force) {
+      fail(`${names} exist beside the database — the server is still running, or did not shut ` +
+        'down cleanly. STOP THE SERVER FIRST; pass --force only if you are certain nothing has this database open');
     }
+    console.error(`restore: WARNING — ${names} exist; if the server is still running it will keep ` +
+      'writing to the pre-restore copy and every transaction after this restore will be LOST on its ' +
+      'next restart. Continuing because of --force.');
   }
 
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  fs.copyFileSync(snapshot, dbPath);
-  fs.chmodSync(dbPath, 0o600);
 
-  // Record the restore in the restored DB's own audit trail.
-  const db = new DatabaseSync(dbPath);
-  db.prepare('INSERT INTO audit_log (at, user_id, action, detail) VALUES (?, NULL, ?, ?)')
-    .run(new Date().toISOString(), 'backups.restore',
-      JSON.stringify({ file: path.basename(snapshot), pre_restore: preRestore && path.basename(preRestore) }));
-  db.close();
+  // Failure-atomic: stage the full copy beside the target FIRST, so a copy
+  // failure (ENOSPC, EACCES) exits here with the live DB untouched. Everything
+  // after this point is same-directory renames, rolled back as a unit on error.
+  const staging = dbPath + '.restore-staging';
+  fs.rmSync(staging, { force: true });
+  try {
+    fs.copyFileSync(snapshot, staging);
+    fs.chmodSync(staging, 0o600);
+  } catch (err) {
+    fs.rmSync(staging, { force: true });
+    fail(`could not stage the snapshot copy (${err.message}) — database untouched`);
+  }
+
+  // Preserve the current DB (and its sidecars, so a stale WAL can never be
+  // replayed over the restored file), then rename the staged copy into place.
+  let preRestore = null;
+  const renamed = []; // [from, to] pairs, for rollback
+  let placed = false;
+  try {
+    if (fs.existsSync(dbPath)) {
+      // never clobber an earlier preserved copy (two restores in one second)
+      const stem = dbPath.replace(/\.db$/, '') + `-pre-restore-${tsName()}`;
+      preRestore = `${stem}.db`;
+      for (let n = 1; fs.existsSync(preRestore); n++) preRestore = `${stem}-${n}.db`;
+      fs.renameSync(dbPath, preRestore);
+      renamed.push([dbPath, preRestore]);
+      for (const ext of ['-wal', '-shm']) {
+        if (fs.existsSync(dbPath + ext)) {
+          fs.renameSync(dbPath + ext, preRestore + ext);
+          renamed.push([dbPath + ext, preRestore + ext]);
+        }
+      }
+    }
+    fs.renameSync(staging, dbPath);
+    placed = true;
+
+    // Record the restore in the restored DB's own audit trail.
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.prepare('INSERT INTO audit_log (at, user_id, action, detail) VALUES (?, NULL, ?, ?)')
+        .run(new Date().toISOString(), 'backups.restore',
+          JSON.stringify({ file: path.basename(snapshot), pre_restore: preRestore && path.basename(preRestore) }));
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    // Put everything back exactly as it was, then exit non-zero.
+    if (placed) for (const ext of ['', '-wal', '-shm']) fs.rmSync(dbPath + ext, { force: true });
+    for (const [from, to] of renamed.reverse()) {
+      try { fs.renameSync(to, from); } catch { /* keep rolling the rest back */ }
+    }
+    fs.rmSync(staging, { force: true });
+    fail(`restore failed (${err.message}) — the original database was left in place`);
+  }
 
   console.log(JSON.stringify({
     ok: true,

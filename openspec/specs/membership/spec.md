@@ -39,12 +39,21 @@ program, expiry, and the pass code as Code 39 barcode — the code the gate scan
 
 At POS, selling a membership SHALL prompt for member name + email (new) or a member search
 (renewal). In the online store, membership purchases capture the same fields at checkout and
-the confirmation page shows the pass card for print-at-home.
+the confirmation page shows the pass card for print-at-home — but only for a member this
+very order created. The order email is unverified guest input, so a renewal of a
+pre-existing member SHALL be acknowledged by member number and new expiry only — never
+the stored name or pass code, which would hand the member's gate credential to anyone
+who knows their email address.
 
 #### Scenario: Web-sold membership
 - **WHEN** a guest buys a membership online
 - **THEN** the confirmation shows their member number, expiry, and barcode pass, and the
   member exists in back-office search.
+
+#### Scenario: Web renewal does not disclose the pass
+- **WHEN** a guest order renews an existing member and the guest view is fetched
+- **THEN** the response carries the member number and new expiry but no pass code and
+  not the member's stored name.
 
 ### Requirement: Structured member order lines
 

@@ -53,8 +53,11 @@ POS-channel payments SHALL be stamped with the cashier's open drawer session ins
 finalize transaction; a cash-bearing POS finalize with no open drawer for the order's
 cashier SHALL fail 409 `no_open_drawer` with the same full-rollback behavior as
 `capacity`. Card-only POS finalizes succeed without a drawer (attribution NULL).
-Web-channel finalizes never require a drawer. The `finalizeOrder(db, ctx, orderId,
-payments)` signature is unchanged — the drawer is resolved internally.
+Web-channel finalizes never require a drawer. The signature is `finalizeOrder(db, ctx,
+orderId, payments, actorId?)` — the drawer is resolved internally, and the optional
+`actorId` is audit-only: the finalize audit row records the acting user (the one who
+tendered) when a caller supplies it, falling back to the order's cashier (the web
+store passes none). Drawer attribution always follows the order's cashier regardless.
 
 #### Scenario: Cash with change
 - **WHEN** the total is $43.50 and the cashier enters $50 cash
@@ -100,7 +103,8 @@ Sellers SHALL be able to void an unpaid order, refund a paid or partially refund
 order in full, or refund selected lines/quantities — every such request gated by the
 manager re-auth approver credential established by security-hardening: the body must
 carry `approver {username, password}` resolving to an active manager or admin. All
-approver failure modes (missing, unknown, wrong password, wrong role, locked) SHALL
+approver failure modes (missing, unknown, wrong password, wrong role, locked, or — in
+production mode — an approver still owing a forced password change) SHALL
 return one generic 403 `approval_required`; approver attempts SHALL count toward the
 approver account's lockout counters and SHALL be rate-limited per IP (429) before any
 password hashing. A refund SHALL: void exactly the affected tickets, decrement the

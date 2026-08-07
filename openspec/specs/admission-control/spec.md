@@ -45,7 +45,9 @@ Expired or suspended members are denied with reason `expired`/`suspended`.
 
 `web/admissions.html` SHALL provide: a large scan input (auto-focus, Enter submits — i.e.
 keyboard-wedge compatible), a big green OK / red DENIED result panel with name/reason, the
-day's admit count, and a recent-scans list. A "simulator" drawer lists today's issued
+day's admit count, and a recent-scans list (codes arrive masked from the API — first
+two and last four characters — because the feed is venue-wide and member pass codes
+are long-lived credentials). A "simulator" drawer lists today's issued
 tickets/members (manager+ only) with one-click scan for demos and testing.
 
 The gate name SHALL persist across reloads (client-side storage; the value remains just

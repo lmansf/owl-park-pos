@@ -13,6 +13,14 @@ const SELL = ['cashier', 'manager', 'admin'];
 const DAY_MS = (24 * 3600 * 1000);
 const REF_MAX = 64; // refs land in DB rows and receipts — cap attacker-length input
 const MAX_REFUND_LINES = 200; // sanity cap on a refund selection body
+// Order bodies arrive anonymously on the web channel and finalize issues one
+// ticket row per unit inside a single synchronous write transaction, so the
+// cart itself has to be bounded: lines AND total units, not just per-line qty.
+const MAX_ORDER_LINES = 100;
+const MAX_ORDER_UNITS = 2000;
+// Customer name/email are copied into every issued ticket (holder_name) and
+// echoed back in the guest view — cap them like member name/email and refs.
+const CUSTOMER_MAX = 200;
 
 // Tender registry — adding a tender = adding an entry here (plus, optionally, a
 // default clearing mapping in accounts.js). finalizeOrder consumes the registry;
@@ -142,6 +150,9 @@ function createOrder(db, ctx, payload, channel) {
   if (channel !== 'pos' && channel !== 'web') throw bad('bad_channel', 'channel must be pos or web');
   const rawLines = Array.isArray(payload?.lines) ? payload.lines : [];
   if (!rawLines.length) throw bad('empty_order', 'Order needs at least one line');
+  if (rawLines.length > MAX_ORDER_LINES) {
+    throw bad('too_many_lines', `At most ${MAX_ORDER_LINES} lines per order`);
+  }
 
   const sellable = new Map(ctx.modules.catalog.getSellable(db, channel).map((p) => [p.id, p]));
 
@@ -198,6 +209,12 @@ function createOrder(db, ctx, payload, channel) {
     return { product, qty, sessionId, member, gross: qty * product.price_cents };
   });
 
+  // Total units, not just per-line qty: finalize does O(units) inserts in one tx.
+  const units = lines.reduce((a, l) => a + l.qty, 0);
+  if (units > MAX_ORDER_UNITS) {
+    throw bad('too_many_units', `At most ${MAX_ORDER_UNITS} units per order (this one has ${units})`);
+  }
+
   const subtotal = lines.reduce((a, l) => a + l.gross, 0);
   const totalDiscount = !discount
     ? 0
@@ -232,8 +249,8 @@ function createOrder(db, ctx, payload, channel) {
         payload?.confirmation ?? null,
         channel,
         payload?.cashier_id ?? null,
-        String(customer.name || '').trim(),
-        String(customer.email || '').trim(),
+        String(customer.name || '').trim().slice(0, CUSTOMER_MAX),
+        String(customer.email || '').trim().slice(0, CUSTOMER_MAX),
         discount ? discount.code : null,
         subtotal,
         totalDiscount,
@@ -267,7 +284,11 @@ function createOrder(db, ctx, payload, channel) {
 // The shared posting path. payments = [{method:<registry key>, amount_cents, ref?}].
 // One tx: tender check, capacity reserve per session line, ticket issuance, membership
 // create/renew, order -> paid, payments rows, audit. -> {order, tickets, members, change_cents}
-function finalizeOrder(db, ctx, orderId, payments) {
+// actorId is optional and audit-only: the user who actually tendered, which is not
+// necessarily the user who built the order (drawer attribution still follows the
+// order's cashier, per the drawer-sessions spec). Callers that omit it — the web
+// store — keep attributing to order.cashier_id exactly as before.
+function finalizeOrder(db, ctx, orderId, payments, actorId) {
   return tx(db, () => {
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     if (!order) throw new ApiError(404, 'not_found', `No order ${orderId}`);
@@ -401,10 +422,15 @@ function finalizeOrder(db, ctx, orderId, payments) {
     );
 
     const detail = getOrderDetail(db, orderId);
-    audit(db, order.cashier_id, 'pos.order.finalize', {
+    const actor = actorId ?? order.cashier_id;
+    audit(db, actor, 'pos.order.finalize', {
       order_id: orderId, confirmation, channel: order.channel,
       total_cents: order.total_cents, change_cents: change,
       tickets: detail.tickets.length, members: members.length,
+      // who took the money vs. who built the order — only worth recording when
+      // they differ (cashier A rings it up, cashier B tenders it)
+      ...(order.cashier_id != null && order.cashier_id !== actor
+        ? { order_cashier_id: order.cashier_id } : {}),
       ...(drawerSessionId != null ? { drawer_session_id: drawerSessionId } : {}),
     });
     return { order: detail, tickets: detail.tickets, members, change_cents: change };
@@ -716,6 +742,52 @@ function mount(router, ctx) {
   // never lock an account but still cost a full scrypt, so without this an
   // authenticated seller could burn CPU with unbounded void/refund attempts.
   const approverRateLimit = createRateLimiter();
+  // The production password-change fence lives in the router guard (main.js) and
+  // only inspects the SESSION holder. Manager re-auth is a second, separate
+  // credential path, so an approver who still owes a rotation would otherwise
+  // keep full approval authority (default manager/manager approving voids on a
+  // half-rolled-out production deployment). Demo mode is untouched.
+  const production = (ctx.env || process.env).OWLPOS_MODE === 'production';
+
+  // Rate-limit + verify the approver credential for void/refund/exchange. Every
+  // failure mode collapses into the same generic 403 — this must not become an
+  // oracle for which manager accounts are fenced.
+  function approveWith(req, res) {
+    approverRateLimit(req, res);
+    const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
+    if (production) {
+      const row = db.prepare('SELECT must_change_password FROM users WHERE id = ?').get(approver.id);
+      if (row?.must_change_password) {
+        throw new ApiError(403, 'approval_required', 'Manager approval required');
+      }
+    }
+    return approver;
+  }
+
+  // Blind close (drawer-sessions spec): before close, no response readable by the
+  // session's opener may reveal cash for that open session. getOrderDetail hands
+  // back raw payments rows (method, amount, change, drawer_session_id), so
+  // re-reading orders would let a cashier reconstruct their own expected cash
+  // exactly. On read-back, rows attributed to the CALLER'S OWN open session keep
+  // their place in the list but carry no money and no method — the method alone
+  // would recover the amount, since a single-tender order's net equals
+  // total_cents. The finalize response still shows the sale being rung, and a
+  // closed session (Z-report, manager review) is fully readable again.
+  function withholdOwnOpenDrawerCash(order, userId) {
+    const open = ctx.modules.drawer.openSessionFor(db, userId ?? null);
+    if (!open) return order;
+    let withheld = false;
+    order.payments = order.payments.map((p) => {
+      if (p.drawer_session_id !== open.id) return p;
+      withheld = true;
+      return {
+        ...p, method: 'withheld', amount_cents: null, change_cents: null,
+        ref: null, drawer_session_id: null, withheld: true,
+      };
+    });
+    if (withheld) order.payments_withheld = true;
+    return order;
+  }
 
   // Create an open order (priced server-side). Body:
   // {lines:[{product_id, qty, event_session_id?, member?}], discount_code?, customer?}
@@ -752,15 +824,18 @@ function mount(router, ctx) {
   router.get('/api/pos/orders/:id', SELL, (req) => {
     const order = getOrderDetail(db, Number(req.params.id));
     if (!order) throw new ApiError(404, 'not_found', `No order ${req.params.id}`);
-    return { order };
+    return { order: withholdOwnOpenDrawerCash(order, req.user.id) };
   });
 
   // Tender registry for the POS tender dialog. SELL only (never public, never
   // gate): it reveals back-office tender config the gate role has no use for.
   router.get('/api/pos/tenders', SELL, () => ({ tenders: listTenders() }));
 
+  // The acting user is audited as the actor; the drawer still follows the order's
+  // cashier (drawer-sessions spec), so a sale rung by A and tendered by B is
+  // attributed to B in the trail and to A's drawer.
   router.post('/api/pos/orders/:id/finalize', SELL, (req) =>
-    finalizeOrder(db, ctx, Number(req.params.id), req.body?.payments)
+    finalizeOrder(db, ctx, Number(req.params.id), req.body?.payments, req.user.id)
   );
 
   // Void an unpaid (open) order — any seller, with manager re-auth: the body
@@ -769,8 +844,7 @@ function mount(router, ctx) {
   // the approver's lockout) before the transaction opens; the password itself
   // is never logged.
   router.post('/api/pos/orders/:id/void', SELL, (req, res) => {
-    approverRateLimit(req, res);
-    const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
+    const approver = approveWith(req, res);
     return tx(db, () => {
       const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id));
       if (!order) throw new ApiError(404, 'not_found', `No order ${req.params.id}`);
@@ -787,17 +861,17 @@ function mount(router, ctx) {
   // re-auth. Body {lines: [{order_line_id, qty}]} refunds a selection; an
   // absent/empty lines array refunds everything still live.
   router.post('/api/pos/orders/:id/refund', SELL, (req, res) => {
-    approverRateLimit(req, res);
-    const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
-    return refundOrder(db, ctx, Number(req.params.id), req.user.id, approver.id, req.body?.lines);
+    const approver = approveWith(req, res);
+    const result = refundOrder(db, ctx, Number(req.params.id), req.user.id, approver.id, req.body?.lines);
+    result.order = withholdOwnOpenDrawerCash(result.order, req.user.id);
+    return result;
   });
 
   // Exchange a valid timed-entry ticket to another session of the same event —
   // any seller, with the same manager re-auth as refunds (exchanges void and
   // reissue tickets, so they carry the same trust level).
   router.post('/api/pos/tickets/:id/exchange', SELL, (req, res) => {
-    approverRateLimit(req, res);
-    const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
+    const approver = approveWith(req, res);
     return exchangeTicket(
       db, ctx, Number(req.params.id), req.body?.event_session_id, req.user.id, approver.id
     );

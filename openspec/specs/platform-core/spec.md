@@ -39,10 +39,17 @@ Sessions SHALL be stateless HMAC-signed tokens carrying the user's `token_epoch`
 the signed payload (`b64url(username).epoch.exp.sig`); a token whose epoch no longer
 matches the user's row is dead. Cookies SHALL be `HttpOnly; SameSite=Strict` with a
 `Max-Age` matching the 12h token expiry, and `Secure` in production mode or on HTTPS
-hosts.
+hosts. Because tokens are stateless, `POST /api/auth/logout` SHALL actually revoke —
+bump the user's `token_epoch` (killing every outstanding token for the account, as
+change-password does) — not merely clear the browser cookie.
 
 Login and the current-password check on `/api/auth/change-password` SHALL be
-rate-limited per IP before any password hashing (429 with `Retry-After`), and failed
+rate-limited before any password hashing (429 with `Retry-After`) in two tiers: a
+primary bucket keyed on (client IP, attempted account) — so a flood of garbage
+usernames from one address cannot 429 every station in a venue — plus a wider per-IP
+ceiling bounding the total hashing work one address can force. The client IP SHALL be
+the TCP peer address; `X-Forwarded-For` is honored (rightmost entry) only behind the
+explicit `OWLPOS_TRUST_PROXY` opt-in, never by default. Failed
 current-password attempts SHALL count toward the account's lockout counters. Accounts
 SHALL lock for 15 minutes after 5 consecutive failures. All login failures — unknown
 username, wrong password, locked account — SHALL return one identical generic 401,
@@ -180,14 +187,34 @@ unchanged (small-screen rules apply only below their breakpoints).
 
 The server SHALL run in one of two modes resolved at `createApp` time from
 `OWLPOS_MODE`: `demo` (default — per-process random secret fallback, no forced password
-change, demo credential hints shown) and `production`. In production mode the server
-SHALL fail closed before listening unless `OWLPOS_SECRET` decodes to at least 32 bytes,
-SHALL set `Secure` cookies, and SHALL hide demo credential hints. `VERCEL` SHALL never
-imply production. `GET /api/health` SHALL report the active `mode`.
+change, demo credential hints shown) and `production`. Seeding SHALL resolve its mode
+from the same environment `createApp` was given. In production mode the server SHALL
+fail closed before listening unless `OWLPOS_SECRET` decodes to at least 32 bytes, SHALL
+set `Secure` cookies, and SHALL hide demo credential hints. `VERCEL` SHALL never imply
+production. `GET /api/health` SHALL report the active `mode`.
+
+A production seed SHALL never create a usable well-known credential: the first admin
+password comes from `OWLPOS_BOOTSTRAP_ADMIN_PASSWORD` (required, at least 12 chars, not
+`admin` — seeding fails closed and writes no rows without it), and the other seeded
+accounts are created deactivated with random passwords nobody holds. An operator enables
+them with `tools/users.js`. A production-mode start SHALL refuse to serve a database in
+which a seeded account is still active with its demo password (password == username).
 
 #### Scenario: Production without a secret refuses to start
 - **WHEN** `OWLPOS_MODE=production` and `OWLPOS_SECRET` is unset or under 32 bytes
 - **THEN** `createApp` throws and nothing listens.
+
+#### Scenario: Production without a bootstrap admin password refuses to seed
+- **WHEN** `OWLPOS_MODE=production` and `OWLPOS_BOOTSTRAP_ADMIN_PASSWORD` is unset,
+  under 12 chars, or `admin`
+- **THEN** seeding throws before writing any rows and nothing listens; with it set, only
+  `admin` is active and takes that password — no seeded account accepts its username as
+  its password.
+
+#### Scenario: Demo database switched to production
+- **WHEN** a database seeded in demo mode still has an active account whose password
+  equals its username and the server starts with `OWLPOS_MODE=production`
+- **THEN** startup fails with an error naming the accounts to rotate or deactivate.
 
 #### Scenario: Demo behavior is unchanged
 - **WHEN** the server starts with no `OWLPOS_MODE`
@@ -202,10 +229,28 @@ authenticated route except `/api/auth/change-password`, `/api/auth/logout`, and
 `/api/auth/me`, until they set a new password (≥ 8 chars, different from username and
 current password). Demo mode SHALL NOT enforce the flag.
 
-#### Scenario: Seeded admin is fenced in until rotation
-- **WHEN** `admin/admin` signs in on a production-mode server and calls any business API
+#### Scenario: Bootstrap admin is fenced in until rotation
+- **WHEN** admin signs in with `OWLPOS_BOOTSTRAP_ADMIN_PASSWORD` on a fresh
+  production-mode server and calls any business API
 - **THEN** the response is 403 `password_change_required`; after a successful
   change-password call the same request succeeds on the freshly issued cookie.
+
+### Requirement: Offline user administration tool
+
+`node tools/users.js <list|activate|deactivate|set-password> [username] [--db <path>]`
+SHALL let an operator manage the seeded accounts without editing the database by hand.
+`activate` and `set-password` read the new password from the `OWLPOS_USER_PASSWORD`
+environment variable — never from arguments (shell history, `ps`) — require at least 8
+chars that are not the username, set `must_change_password = 1` so the holder rotates it
+on first production sign-in, bump the account's `token_epoch` (revoking existing
+sessions), and append an audit row. `deactivate` SHALL refuse to disable the last active
+admin.
+
+#### Scenario: Enabling a production cashier
+- **WHEN** the operator runs `OWLPOS_USER_PASSWORD=… node tools/users.js activate
+  cashier` against a production-seeded database
+- **THEN** cashier signs in with that temporary password, is fenced until rotating it,
+  and the activation is recorded in the audit log.
 
 ### Requirement: Scheduled and manual database snapshots
 
@@ -234,9 +279,14 @@ served over HTTP, and on ephemeral hosting the run route returns 400.
 `node tools/restore.js <snapshot> [--db <path>] [--force]` SHALL restore a snapshot with
 the server stopped: it verifies `integrity_check`, refuses snapshots whose
 `schema_migrations` contain names unknown to the checkout (older snapshots are fine —
-pending migrations apply on next start), preserves the current database and its WAL/SHM
-sidecars as a `-pre-restore-` copy, and appends a `backups.restore` audit row to the
-restored database. It SHALL exit non-zero without touching the target on any failure.
+pending migrations apply on next start), refuses a snapshot that is the target itself,
+preserves the current database and its WAL/SHM sidecars as a `-pre-restore-` copy, and
+appends a `backups.restore` audit row to the restored database. While `-wal`/`-shm`
+sidecars exist beside the target (the server is still running, or crashed without a
+clean close) it SHALL refuse to run; only `--force` overrides that, with a loud warning.
+The restore SHALL be failure-atomic: the snapshot is staged beside the target first,
+and any failure rolls the renames back and exits non-zero with the original database
+in place.
 
 #### Scenario: Newer snapshot refused
 - **WHEN** the tool is pointed at a snapshot containing migration `999_future.sql` that

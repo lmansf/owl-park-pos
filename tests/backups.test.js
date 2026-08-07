@@ -305,3 +305,97 @@ test('backups: restore round-trip and newer-schema refusal', async (t) => {
       { stdio: 'pipe' }));
   });
 });
+
+test('backups: restore live-server and failure-atomicity guards', async (t) => {
+  // Build a DB + one real snapshot, all cleanly closed.
+  const { server, db, ctx, base, dbPath } = await startServer();
+  const admin = await login(base, 'admin');
+  const cashier = await login(base, 'cashier');
+  await sellOne(cashier);
+  const snapName = (await admin('POST', '/api/backups/run', {})).data.backup.file;
+  const snapPath = path.join(ctx.backupDir, snapName);
+  const usersBefore = db.prepare('SELECT COUNT(*) n FROM users').get().n;
+  await new Promise((resolve) => server.close(resolve));
+  db.close();
+  const dataDir = path.dirname(dbPath);
+
+  await t.test('refuses while WAL/SHM sidecars exist (server running / unclean shutdown)', () => {
+    // -shm exists exactly while a connection is open (or after a crash) — a
+    // 10s-idle running server must not slip past the old mtime heuristic
+    fs.writeFileSync(dbPath + '-shm', '');
+    const before = fs.statSync(dbPath).mtimeMs;
+    assert.throws(
+      () => execFileSync(process.execPath, [RESTORE, snapPath, '--db', dbPath], { stdio: 'pipe' }),
+      /still running|shut/i
+    );
+    assert.equal(fs.statSync(dbPath).mtimeMs, before, 'target untouched');
+    assert.ok(!fs.readdirSync(dataDir).some((f) => f.includes('-pre-restore-')),
+      'nothing was moved aside');
+    // --force overrides, loudly, for the crash-leftover case
+    const out = execFileSync(process.execPath,
+      [RESTORE, snapPath, '--db', dbPath, '--force'], { stdio: 'pipe', encoding: 'utf8' });
+    assert.ok(JSON.parse(out).ok);
+    fs.rmSync(dbPath + '-shm', { force: true });
+  });
+
+  await t.test('refuses to restore the target onto itself', () => {
+    const before = fs.statSync(dbPath).mtimeMs;
+    assert.throws(
+      () => execFileSync(process.execPath, [RESTORE, dbPath, '--db', dbPath, '--force'],
+        { stdio: 'pipe' }),
+      /same file/
+    );
+    assert.ok(fs.existsSync(dbPath), 'live DB still in place');
+    assert.equal(fs.statSync(dbPath).mtimeMs, before, 'target untouched');
+  });
+
+  await t.test('rolls back when the restore fails after moving the live DB aside', () => {
+    // A "snapshot" that passes every upstream check (integrity, known
+    // migrations, name pattern) but blows up the post-rename phase: the
+    // restore's own audit insert finds no audit_log table.
+    const bogusDir = fs.mkdtempSync(path.join(os.tmpdir(), 'op-bogus-'));
+    const bogusPath = path.join(bogusDir, 'owlpark-20260101T000000-manual.db');
+    const bogus = new DatabaseSync(bogusPath);
+    bogus.exec('CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT)');
+    bogus.close();
+
+    // the previous subtests' read-only integrity probe leaves WAL sidecars it
+    // cannot delete, and the --force restore left a pre-restore copy — clear
+    // both so this models a cleanly-stopped server in a tidy data dir
+    for (const ext of ['-wal', '-shm']) fs.rmSync(dbPath + ext, { force: true });
+    for (const f of fs.readdirSync(dataDir)) {
+      if (f.includes('-pre-restore-')) fs.rmSync(path.join(dataDir, f), { force: true });
+    }
+    const pre = fs.readdirSync(dataDir);
+    assert.throws(
+      () => execFileSync(process.execPath, [RESTORE, bogusPath, '--db', dbPath], { stdio: 'pipe' }),
+      /left in place/
+    );
+    // original DB is back at dbPath with its real contents, no litter left over
+    const app = createApp(dbPath);
+    assert.equal(app.db.prepare('SELECT COUNT(*) n FROM users').get().n, usersBefore);
+    app.db.close();
+    assert.deepEqual(fs.readdirSync(dataDir).sort(), pre.sort(),
+      'no staging/pre-restore litter after rollback');
+  });
+});
+
+test('backups: snapshot DELETE works with an unnormalized OWLPOS_BACKUP_DIR', async (t) => {
+  const dbPath = tempDb();
+  // trailing slash — the common env-file spelling that used to 400 every DELETE
+  const backupDir = path.join(path.dirname(dbPath), 'backups') + path.sep;
+  const { server, db } = createApp(dbPath, {
+    env: { OWLPOS_BACKUP_DIR: backupDir, OWLPOS_BACKUP_INTERVAL_MIN: '0' },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.close(); db.close(); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const admin = await login(base, 'admin');
+  const snapName = (await admin('POST', '/api/backups/run', {})).data.backup.file;
+  assert.ok(fs.existsSync(path.join(backupDir, snapName)));
+
+  const del = await admin('DELETE', `/api/backups/${snapName}`);
+  assert.equal(del.status, 200, `DELETE must accept a valid snapshot (got ${del.status})`);
+  assert.ok(!fs.existsSync(path.join(backupDir, snapName)), 'snapshot removed');
+});
