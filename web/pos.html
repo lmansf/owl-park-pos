@@ -75,7 +75,10 @@
 
   .tender-quick { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
   .tender-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-  .tender-row input { width: 120px; }
+  .tender-row .t-label { flex: 0 0 64px; }
+  .tender-row input { flex: 1; min-width: 0; width: auto; }
+  /* registry can grow the tender list — the dialog scrolls, Finalize stays reachable */
+  dialog#dlg-tender { max-height: 90dvh; overflow-y: auto; }
   .tender-list div { display: flex; justify-content: space-between; padding: 4px 0; }
   .tender-sum { font-variant-numeric: tabular-nums; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
   .tender-sum div { display: flex; justify-content: space-between; }
@@ -209,17 +212,7 @@
   <h2>Tender</h2>
   <div class="tender-sum"><div class="due"><span>Total due</span><span id="tender-total"></span></div></div>
   <div class="rule" style="margin:10px 0; border-top:1px solid var(--line)"></div>
-  <div class="tender-row">
-    <span style="width:44px">Cash</span>
-    <input id="cash-amt" inputmode="decimal" placeholder="0.00">
-    <button class="op-btn secondary" id="add-cash">Add cash</button>
-  </div>
-  <div class="tender-quick" id="quick-bills"></div>
-  <div class="tender-row">
-    <span style="width:44px">Card</span>
-    <input id="card-amt" inputmode="decimal" placeholder="0.00">
-    <button class="op-btn secondary" id="add-card">Add card</button>
-  </div>
+  <div id="tender-rows"><!-- one row per registry tender, rendered from /api/pos/tenders --></div>
   <div class="tender-list" id="tender-list"></div>
   <div class="tender-sum">
     <div><span>Tendered</span><span id="tender-sum"></span></div>
@@ -529,7 +522,12 @@
 
   // ---------- tender ----------
   const dlgTender = $('dlg-tender');
-  let tenders = [];
+  let tenders = [];       // payments being assembled: {method, amount_cents}
+  let tenderTypes = [];   // registry from GET /api/pos/tenders: {method, label, change}
+  const tenderLabel = (m) => (tenderTypes.find((t) => t.method === m) || {}).label || m;
+  async function loadTenders() {
+    tenderTypes = (await op.api('/api/pos/tenders')).tenders;
+  }
   $('tender-cancel').onclick = () => dlgTender.close();
 
   $('btn-tender').onclick = async () => {
@@ -568,35 +566,55 @@
     $('tender-sum').textContent = money(sum);
     $('tender-remaining').textContent = money(remaining);
     $('tender-change').textContent = money(change);
-    $('cash-amt').value = ''; $('card-amt').value = remaining ? (remaining / 100).toFixed(2) : '';
+
+    // One row per registry tender; quick bills sit under the first change-bearing
+    // (cash-like) row. Non-change tenders prefill with the remaining balance.
+    const quickIdx = tenderTypes.findIndex((t) => t.change);
+    $('tender-rows').innerHTML = tenderTypes.map((t, i) => `
+      <div class="tender-row">
+        <span class="t-label">${esc(t.label)}</span>
+        <input data-method="${esc(t.method)}" inputmode="decimal" placeholder="0.00"
+          value="${!t.change && remaining ? (remaining / 100).toFixed(2) : ''}">
+        <button class="op-btn secondary" data-add="${esc(t.method)}">Add ${esc(t.label.toLowerCase())}</button>
+      </div>
+      ${i === quickIdx ? '<div class="tender-quick" id="quick-bills"></div>' : ''}`).join('');
+    for (const b of $('tender-rows').querySelectorAll('[data-add]')) {
+      b.onclick = () => {
+        const method = b.dataset.add;
+        const amt = parseAmt(b.parentElement.querySelector('input').value);
+        if (!amt) return op.toast(`Enter a ${tenderLabel(method).toLowerCase()} amount`, 'err');
+        tenders.push({ method, amount_cents: amt }); renderTender();
+      };
+    }
+
     $('tender-list').innerHTML = tenders.map((t, i) => `
-      <div><span>${t.method === 'cash' ? 'Cash' : 'Card'} ${money(t.amount_cents)}</span>
+      <div><span>${esc(tenderLabel(t.method))} ${money(t.amount_cents)}</span>
       <button class="op-btn secondary" data-i="${i}" style="padding:1px 10px">remove</button></div>`).join('');
     for (const b of $('tender-list').querySelectorAll('button')) {
       b.onclick = () => { tenders.splice(Number(b.dataset.i), 1); renderTender(); };
     }
-    const cashSum = tenders.filter((t) => t.method === 'cash').reduce((a, t) => a + t.amount_cents, 0);
-    $('tender-finalize').disabled = !(sum >= total && change <= cashSum);
-    $('quick-bills').innerHTML = '';
-    const bills = [remaining, 2000, 5000, 10000].filter((b, i, a) => b > 0 && a.indexOf(b) === i);
-    for (const b of bills) {
-      const btn = document.createElement('button');
-      btn.className = 'op-btn secondary';
-      btn.textContent = b === remaining ? `Exact ${money(b)}` : money(b);
-      btn.onclick = () => { tenders.push({ method: 'cash', amount_cents: b }); renderTender(); };
-      $('quick-bills').appendChild(btn);
+
+    // Finalize enables once tendered covers the total AND change never exceeds
+    // what change-bearing tenders can hand back (mirrors the server rule).
+    const changeable = new Set(tenderTypes.filter((t) => t.change).map((t) => t.method));
+    const changeableSum = tenders
+      .filter((t) => changeable.has(t.method))
+      .reduce((a, t) => a + t.amount_cents, 0);
+    $('tender-finalize').disabled = !(sum >= total && change <= changeableSum);
+
+    const quick = document.getElementById('quick-bills');
+    if (quick) {
+      const cashMethod = tenderTypes[quickIdx].method;
+      const bills = [remaining, 2000, 5000, 10000].filter((b, i, a) => b > 0 && a.indexOf(b) === i);
+      for (const b of bills) {
+        const btn = document.createElement('button');
+        btn.className = 'op-btn secondary';
+        btn.textContent = b === remaining ? `Exact ${money(b)}` : money(b);
+        btn.onclick = () => { tenders.push({ method: cashMethod, amount_cents: b }); renderTender(); };
+        quick.appendChild(btn);
+      }
     }
   }
-  $('add-cash').onclick = () => {
-    const amt = parseAmt($('cash-amt').value);
-    if (!amt) return op.toast('Enter a cash amount', 'err');
-    tenders.push({ method: 'cash', amount_cents: amt }); renderTender();
-  };
-  $('add-card').onclick = () => {
-    const amt = parseAmt($('card-amt').value);
-    if (!amt) return op.toast('Enter a card amount', 'err');
-    tenders.push({ method: 'card_sim', amount_cents: amt }); renderTender();
-  };
   $('tender-finalize').onclick = async () => {
     try {
       const result = await op.api(`/api/pos/orders/${currentOrder.id}/finalize`, { body: { payments: tenders } });
@@ -643,7 +661,7 @@
         </table>
         <div class="rule"></div>
         <table>${order.payments.map((p) => `
-          <tr><td>${p.amount_cents < 0 ? 'REFUND ' : ''}${p.method === 'cash' ? 'Cash' : 'Card'}
+          <tr><td>${p.amount_cents < 0 ? 'REFUND ' : ''}${esc(tenderLabel(p.method))}
             ${p.ref ? `<span class="muted mono">${esc(p.ref)}</span>` : ''}</td>
           <td class="num">${money(p.amount_cents)}</td></tr>`).join('')}
           ${change > 0 ? `<tr><td>Change</td><td class="num">${money(change)}</td></tr>` : ''}
@@ -733,7 +751,7 @@
   $('order-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchOrders(); });
 
   // ---------- boot ----------
-  await loadProducts();
+  await Promise.all([loadProducts(), loadTenders()]);
   renderCart();
 })();
 </script>
