@@ -72,6 +72,22 @@ test('pos: pricing, posting path, tenders, void/refund', async (t) => {
     assert.equal(r.status, 403);
   });
 
+  await t.test('tender registry: exact public shape, anonymous 401, gate 403', async () => {
+    const r = await cashier('GET', '/api/pos/tenders');
+    assert.equal(r.status, 200);
+    // deepEqual pins the exact serialization — no authorize hook may ever leak
+    assert.deepEqual(r.data.tenders, [
+      { method: 'cash', label: 'Cash', change: true },
+      { method: 'card_sim', label: 'Card', change: false },
+      { method: 'voucher', label: 'Voucher', change: false },
+    ]);
+    const anon = await fetch(base + '/api/pos/tenders');
+    assert.equal(anon.status, 401);
+    const gate = client(base);
+    await gate('POST', '/api/auth/login', { username: 'gate', password: 'gate' });
+    assert.equal((await gate('GET', '/api/pos/tenders')).status, 403);
+  });
+
   await t.test('createOrder validation: bad product, missing session, bad discount', async () => {
     let r = await cashier('POST', '/api/pos/orders', { lines: [] });
     assert.equal(r.status, 400);
@@ -212,6 +228,139 @@ test('pos: pricing, posting path, tenders, void/refund', async (t) => {
     // three tickets: 2 adult + 1 planetarium (session on the right one)
     assert.equal(fin.data.tickets.length, 3);
     assert.equal(fin.data.tickets.filter((x) => x.event_session_id === s.id).length, 1);
+  });
+
+  await t.test('voucher: exact-amount finalize, default and supplied refs', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: adult.id, qty: 1 }],
+    });
+    const o = r.data.order;
+    const fin = await cashier('POST', `/api/pos/orders/${o.id}/finalize`, {
+      payments: [{ method: 'voucher', amount_cents: o.total_cents }],
+    });
+    assert.equal(fin.status, 200);
+    assert.equal(fin.data.change_cents, 0);
+    assert.equal(fin.data.order.status, 'paid');
+    assert.equal(fin.data.order.payments.length, 1);
+    assert.equal(fin.data.order.payments[0].method, 'voucher');
+    assert.equal(fin.data.order.payments[0].change_cents, 0);
+    assert.equal(fin.data.order.payments[0].ref, 'VOUCHER'); // default ref
+    // a supplied ref is preserved
+    const r2 = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: adult.id, qty: 1 }],
+    });
+    const fin2 = await cashier('POST', `/api/pos/orders/${r2.data.order.id}/finalize`, {
+      payments: [{ method: 'voucher', amount_cents: r2.data.order.total_cents, ref: 'V-123' }],
+    });
+    assert.equal(fin2.status, 200);
+    assert.equal(fin2.data.order.payments[0].ref, 'V-123');
+  });
+
+  await t.test('split voucher + cash: change comes off the cash row only', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: adult.id, qty: 1 }],
+    });
+    const o = r.data.order; // 3182
+    const fin = await cashier('POST', `/api/pos/orders/${o.id}/finalize`, {
+      payments: [
+        { method: 'voucher', amount_cents: 1000 },
+        { method: 'cash', amount_cents: o.total_cents - 1000 + 300 },
+      ],
+    });
+    assert.equal(fin.status, 200);
+    assert.equal(fin.data.change_cents, 300);
+    const pays = fin.data.order.payments;
+    assert.equal(pays.length, 2);
+    assert.equal(pays[0].method, 'voucher');
+    assert.equal(pays[0].change_cents, 0); // never on a non-change tender
+    assert.equal(pays[1].method, 'cash');
+    assert.equal(pays[1].change_cents, 300);
+    // net of change equals the order total
+    assert.equal(pays.reduce((a, p) => a + p.amount_cents - p.change_cents, 0), o.total_cents);
+  });
+
+  await t.test('voucher over-tender (change without a change-bearing tender) is rejected', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: adult.id, qty: 1 }],
+    });
+    const o = r.data.order;
+    const fin = await cashier('POST', `/api/pos/orders/${o.id}/finalize`, {
+      payments: [{ method: 'voucher', amount_cents: o.total_cents + 500 }],
+    });
+    assert.equal(fin.status, 400);
+    assert.equal(fin.data.error, 'bad_tender');
+    const after = await cashier('GET', `/api/pos/orders/${o.id}`);
+    assert.equal(after.data.order.status, 'open');
+    assert.equal(after.data.order.payments.length, 0);
+  });
+
+  await t.test('unknown/hostile methods rejected before any write; table intact', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: adult.id, qty: 1 }],
+    });
+    const o = r.data.order;
+    for (const method of ['bitcoin', "cash'; DROP TABLE payments;--", 'CASH', ' cash', { toString: 1 }, null]) {
+      const fin = await cashier('POST', `/api/pos/orders/${o.id}/finalize`, {
+        payments: [{ method, amount_cents: o.total_cents }],
+      });
+      assert.equal(fin.status, 400, `method ${JSON.stringify(method)} rejected`);
+      assert.equal(fin.data.error, 'bad_method');
+      // error message names valid methods only, never echoes attacker input
+      assert.ok(!fin.data.message.includes('DROP'), 'no attacker echo');
+    }
+    // payments table survived and the order took no rows
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?').get(o.id).n, 0);
+    const after = await cashier('GET', `/api/pos/orders/${o.id}`);
+    assert.equal(after.data.order.status, 'open');
+  });
+
+  await t.test('bad amounts rejected: zero, negative, float, huge float', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: adult.id, qty: 1 }],
+    });
+    const o = r.data.order;
+    for (const amount_cents of [0, -100, 10.5, 1e15 + 0.5, null, 'abc']) {
+      const fin = await cashier('POST', `/api/pos/orders/${o.id}/finalize`, {
+        payments: [{ method: 'voucher', amount_cents }],
+      });
+      assert.equal(fin.status, 400, `amount ${amount_cents} rejected`);
+      assert.equal(fin.data.error, 'bad_amount');
+    }
+    assert.equal((await cashier('GET', `/api/pos/orders/${o.id}`)).data.order.payments.length, 0);
+  });
+
+  await t.test('over-long ref is truncated to 64 chars, never stored raw', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: adult.id, qty: 1 }],
+    });
+    const o = r.data.order;
+    const fin = await cashier('POST', `/api/pos/orders/${o.id}/finalize`, {
+      payments: [{ method: 'voucher', amount_cents: o.total_cents, ref: 'X'.repeat(10000) }],
+    });
+    assert.equal(fin.status, 200);
+    assert.equal(fin.data.order.payments[0].ref.length, 64);
+  });
+
+  await t.test('refund of a voucher-paid order writes a negative voucher row', async () => {
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: adult.id, qty: 1 }],
+    });
+    const o = r.data.order;
+    const fin = await cashier('POST', `/api/pos/orders/${o.id}/finalize`, {
+      payments: [{ method: 'voucher', amount_cents: o.total_cents }],
+    });
+    assert.equal(fin.status, 200);
+    const ref = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {
+      approver: { username: 'manager', password: 'manager' },
+    });
+    assert.equal(ref.status, 200);
+    const neg = ref.data.order.payments.filter((p) => p.amount_cents < 0);
+    assert.equal(neg.length, 1);
+    assert.equal(neg[0].method, 'voucher');
+    assert.equal(neg[0].amount_cents, -o.total_cents);
+    assert.equal(neg[0].ref, 'REFUND');
+    const net = ref.data.order.payments.reduce((a, p) => a + p.amount_cents - p.change_cents, 0);
+    assert.equal(net, 0);
   });
 
   await t.test('card over-tender (change without cash) is rejected', async () => {
@@ -695,4 +844,88 @@ test('pos: member-order-lines migration backfills legacy descriptions', async (t
   assert.equal(result.members.length, 1);
   assert.equal(result.members[0].id, 507);
   assert.ok(Date.parse(result.members[0].expires_at) > Date.parse('2026-01-01T00:00:00.000Z'));
+});
+
+test('migration 006: payments recreate preserves rows, drops the method enum CHECK', () => {
+  const { openDb, migrate } = require('../server/core/db');
+  const dbPath = tempDb();
+  const db = openDb(dbPath);
+  const dir = path.join(__dirname, '..', 'server', 'migrations');
+  // Apply only the pre-tender migrations, exactly as the runner would.
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.sql')).sort()) {
+    if (f >= '006') continue;
+    db.exec(fs.readFileSync(path.join(dir, f), 'utf8'));
+    db.prepare('INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)')
+      .run(f, new Date().toISOString());
+  }
+  // A paid order with old-CHECK payments, as a pre-migration DB would hold.
+  db.prepare(
+    `INSERT INTO orders (id, channel, status, subtotal_cents, discount_cents, tax_cents,
+       total_cents, created_at) VALUES (1, 'pos', 'paid', 5000, 0, 0, 5000, ?)`
+  ).run(new Date().toISOString());
+  db.prepare(
+    `INSERT INTO payments (id, order_id, method, amount_cents, change_cents, ref, created_at)
+     VALUES (1, 1, 'cash', 3000, 500, '', ?), (2, 1, 'card_sim', 2500, 0, 'AUTH-ABC123', ?)`
+  ).run(new Date().toISOString(), new Date().toISOString());
+  assert.throws(() => db.prepare(
+    "INSERT INTO payments (order_id, method, amount_cents, created_at) VALUES (1, 'voucher', 1, '')"
+  ).run(), /CHECK/, 'old schema still rejects voucher');
+
+  migrate(db, dir); // applies 006+ only
+
+  const rows = db.prepare('SELECT * FROM payments ORDER BY id').all();
+  assert.equal(rows.length, 2);
+  assert.deepEqual(
+    rows.map((r) => [r.id, r.order_id, r.method, r.amount_cents, r.change_cents, r.ref]),
+    [[1, 1, 'cash', 3000, 500, ''], [2, 1, 'card_sim', 2500, 0, 'AUTH-ABC123']],
+    'ids and values preserved across the recreate'
+  );
+  assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 0, 'FKs clean');
+  // registry methods now insert; empty method still blocked by the new CHECK
+  db.prepare(
+    `INSERT INTO payments (order_id, method, amount_cents, created_at) VALUES (1, 'voucher', 100, ?)`
+  ).run(new Date().toISOString());
+  assert.throws(() => db.prepare(
+    "INSERT INTO payments (order_id, method, amount_cents, created_at) VALUES (1, '', 1, '')"
+  ).run(), /CHECK/);
+  // the index survived under its original name
+  assert.ok(db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_payments_order'"
+  ).get());
+  db.close();
+});
+
+test('pos: guest checkout cannot smuggle a tender — server builds card_sim itself', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+
+  const adult = db.prepare("SELECT * FROM products WHERE sku = 'ADULT'").get();
+  const res = await fetch(base + '/api/store/checkout', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      customer: { name: 'Sneaky Guest', email: 'sneaky@example.com' },
+      lines: [{ product_id: adult.id, qty: 1 }],
+      card: { number: '4242 4242 4242 4242' },
+      // injected fields a guest must never control:
+      payments: [{ method: 'voucher', amount_cents: 1 }],
+      method: 'voucher',
+      amount_cents: 1,
+    }),
+  });
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  const orderId = db
+    .prepare('SELECT id, status, total_cents FROM orders WHERE confirmation = ?')
+    .get(data.confirmation);
+  assert.equal(orderId.status, 'paid');
+  const pays = db.prepare('SELECT * FROM payments WHERE order_id = ?').all(orderId.id);
+  assert.equal(pays.length, 1);
+  assert.equal(pays[0].method, 'card_sim'); // injected voucher ignored
+  assert.equal(pays[0].amount_cents, orderId.total_cents); // full total, not 1 cent
+  assert.match(pays[0].ref, /^CARD-4242$/);
+  // guest order view exposes no payments/tender data
+  assert.equal(data.order.payments, undefined);
 });

@@ -158,6 +158,19 @@ async function main() {
   const scanVoid = await gate('POST', '/api/admissions/scan', { code: adultTickets[1].code, gate: 'main' });
   ok(scanVoid.data.result === 'denied' && scanVoid.data.reason === 'void', 'refunded ticket scans denied: void');
 
+  console.log('— pluggable tenders —');
+  const tenderList = (await cashier('GET', '/api/pos/tenders')).data.tenders;
+  ok(tenderList.some((t) => t.method === 'voucher'), 'tender registry serves voucher to sellers');
+  const vOrder = (await cashier('POST', '/api/pos/orders', {
+    lines: [{ product_id: adult.id, qty: 1 }],
+  })).data.order;
+  const vFin = await cashier('POST', `/api/pos/orders/${vOrder.id}/finalize`, {
+    payments: [{ method: 'voucher', amount_cents: vOrder.total_cents }],
+  });
+  ok(vFin.status === 200 && vFin.data.order.payments[0].method === 'voucher'
+    && vFin.data.order.payments[0].ref === 'VOUCHER',
+    'voucher payment finalizes through the shared posting path');
+
   console.log('— reports reconcile —');
   const today = new Date();
   const d = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;

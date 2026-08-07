@@ -80,7 +80,7 @@ test('accounts: default chart, mappings, roles, CRUD', async (t) => {
     assert.equal(r.status, 200);
     accounts = r.data.accounts;
     const codes = accounts.map((a) => a.code);
-    for (const code of ['1000', '1010', '2200', '4000', '4100', '4200', '4900', '9999']) {
+    for (const code of ['1000', '1010', '1020', '2200', '4000', '4100', '4200', '4900', '9999']) {
       assert.ok(codes.includes(code), `chart has ${code}`);
     }
     const unmapped = accounts.find((a) => a.code === '9999');
@@ -95,7 +95,9 @@ test('accounts: default chart, mappings, roles, CRUD', async (t) => {
       mappings.some((m) => m.scope === scope && String(m.ref_key) === String(key));
     for (const p of targets.products) assert.ok(has('product', p.id), `product ${p.sku} mapped`);
     for (const g of targets.tax_groups) assert.ok(has('tax_group', g.id), `tax group ${g.id} mapped`);
-    for (const m of ['cash', 'card_sim']) assert.ok(has('tender', m), `tender ${m} mapped`);
+    for (const m of ['cash', 'card_sim', 'voucher']) assert.ok(has('tender', m), `tender ${m} mapped`);
+    // targets.tenders serves the pos registry method list
+    assert.deepEqual(targets.tenders, ['cash', 'card_sim', 'voucher']);
     for (const d of targets.discounts) assert.ok(has('discount', d.id), `discount ${d.code} mapped`);
     // spot check: ticket products map to 4000 Admission Income
     const income4000 = accounts.find((a) => a.code === '4000').id;
@@ -135,6 +137,11 @@ test('accounts: default chart, mappings, roles, CRUD', async (t) => {
   await t.test('mapping validation: bad scope, bad ref, bad account, clear', async () => {
     assert.equal((await admin('PUT', '/api/accounts/map', { scope: 'venue', ref_key: '1', account_id: 1 })).status, 400);
     assert.equal((await admin('PUT', '/api/accounts/map', { scope: 'tender', ref_key: 'bitcoin', account_id: 1 })).status, 400);
+    // registry tenders are valid mapping keys
+    const voucherAcct = accounts.find((a) => a.code === '1020');
+    const vm = await admin('PUT', '/api/accounts/map', { scope: 'tender', ref_key: 'voucher', account_id: voucherAcct.id });
+    assert.equal(vm.status, 200);
+    assert.equal(vm.data.mapping.account_id, voucherAcct.id);
     assert.equal((await admin('PUT', '/api/accounts/map', { scope: 'product', ref_key: '99999', account_id: 1 })).status, 400);
     assert.equal((await admin('PUT', '/api/accounts/map', { scope: 'tender', ref_key: 'cash', account_id: 99999 })).status, 400);
     const cleared = await admin('PUT', '/api/accounts/map', { scope: 'tender', ref_key: 'cash', account_id: null });
@@ -297,5 +304,62 @@ test('accounts: unmapped product posts to 9999 suspense, then remaps', async (t)
     const codes = byCode(r.data);
     assert.ok(!codes.has('9999'), 'suspense line gone after mapping');
     assert.equal(codes.get('4200').credit, 2000);
+  });
+});
+
+test('accounts: voucher tender journal — mapped, mixed with cash, then unmapped', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+  const admin = await login(base, 'admin');
+  const cashier = await login(base, 'cashier');
+
+  const sellable = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
+  const adult = sellable.find((p) => p.sku === 'ADULT');
+
+  const sell = async (paymentsOf) => {
+    const o = await cashier('POST', '/api/pos/orders', { lines: [{ product_id: adult.id, qty: 1 }] });
+    assert.equal(o.status, 200);
+    const order = o.data.order;
+    const fin = await cashier('POST', `/api/pos/orders/${order.id}/finalize`, {
+      payments: paymentsOf(order),
+    });
+    assert.equal(fin.status, 200);
+    return order;
+  };
+
+  // 1) voucher-only exact payment, 2) voucher + cash split with change from cash
+  const o1 = await sell((o) => [{ method: 'voucher', amount_cents: o.total_cents }]);
+  const o2 = await sell((o) => [
+    { method: 'voucher', amount_cents: 1000 },
+    { method: 'cash', amount_cents: o.total_cents - 1000 + 300 },
+  ]);
+
+  await t.test('voucher legs land on 1020 Voucher Clearing; days balance', async () => {
+    const r = await admin('GET', '/api/accounts/journal' + JOURNAL_RANGE);
+    assert.equal(r.status, 200);
+    const codes = byCode(r.data);
+    // voucher clearing: full voucher amounts (voucher rows never carry change)
+    assert.equal(codes.get('1020').debit, o1.total_cents + 1000);
+    // cash clearing: cash net of the 300 change
+    assert.equal(codes.get('1000').debit, o2.total_cents - 1000);
+    assert.ok(!codes.has('9999'), 'everything mapped');
+    for (const d of journalSection(r.data, 'Daily totals').rows) {
+      assert.equal(d.difference_cents, 0, `day ${d.date} out of balance`);
+    }
+  });
+
+  await t.test('clearing the voucher mapping drops its legs to 9999 and still balances', async () => {
+    const cleared = await admin('PUT', '/api/accounts/map', {
+      scope: 'tender', ref_key: 'voucher', account_id: null,
+    });
+    assert.equal(cleared.status, 200);
+    const o3 = await sell((o) => [{ method: 'voucher', amount_cents: o.total_cents }]);
+    const r = await admin('GET', '/api/accounts/journal' + JOURNAL_RANGE);
+    const codes = byCode(r.data);
+    // journal is derived at read time: ALL voucher legs now sit on suspense
+    assert.equal(codes.get('9999').debit, o1.total_cents + 1000 + o3.total_cents);
+    for (const d of journalSection(r.data, 'Daily totals').rows) {
+      assert.equal(d.difference_cents, 0, `day ${d.date} out of balance`);
+    }
   });
 });
