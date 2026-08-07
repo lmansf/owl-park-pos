@@ -35,7 +35,10 @@
   .menu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   .pos-prod.sm { min-height: 54px; }
   .pos-prod.lg { min-height: 108px; grid-column: span 2; }
-  @media (max-width: 900px) { .pos-prod.lg { grid-column: span 1; } }
+  @media (max-width: 900px) {
+    .pos-prod.lg { grid-column: span 1; }
+    .pos-sell { grid-template-columns: minmax(0, 1fr); }
+  }
   .pos-prod.link .price { color: inherit; opacity: .8; }
 
   .pos-cart { position: sticky; top: 68px; }

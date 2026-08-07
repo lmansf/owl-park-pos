@@ -15,6 +15,7 @@
   --radius: 12px;
 }
 * { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
 html, body { margin: 0; padding: 0; }
 body {
   background: var(--bg);
@@ -144,6 +145,22 @@ table.st-table { width: 100%; border-collapse: collapse; }
 .st-ticket .meta { margin: 10px 0; font-size: 14px; color: #333; }
 .st-ticket .meta div { margin: 2px 0; }
 .st-ticket .bc { margin-top: 12px; color: #000; }
+
+/* phone-width: no page overflow, cart table scrolls in place, safe-area top bar */
+@media (max-width: 640px) {
+  .st-topbar {
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+    gap: 10px;
+  }
+  .st-main { padding: 16px 12px 64px; }
+  .st-hero { padding: 26px 18px; }
+  .st-hero h1 { font-size: 24px; }
+  table.st-table { display: block; overflow-x: auto; }
+  .st-totals { max-width: none; }
+  .st-ticket { padding: 16px; }
+  .st-remove { padding: 8px; }
+}
 
 @media print {
   .st-topbar, .st-noprint { display: none !important; }

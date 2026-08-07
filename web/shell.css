@@ -13,6 +13,7 @@
   --radius: 10px;
 }
 * { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
 html, body { margin: 0; padding: 0; }
 body {
   background: var(--bg);
@@ -103,6 +104,23 @@ dialog.op-modal::backdrop { background: rgba(0,0,0,.6); }
 .op-muted { color: var(--muted); }
 .op-right { text-align: right; }
 .op-grid { display: grid; gap: 12px; }
+
+/* phone-width: no page overflow, wide tables scroll in place, no iOS focus-zoom */
+@media (max-width: 640px) {
+  .op-topbar {
+    padding-left: max(10px, env(safe-area-inset-left));
+    padding-right: max(10px, env(safe-area-inset-right));
+    gap: 10px;
+  }
+  .op-brand small { display: none; }
+  .op-user { font-size: 12px; }
+  .op-main { padding: 14px 10px 60px; }
+  .op-card { padding: 12px; }
+  table.op-table { display: block; overflow-x: auto; }
+  input, select, textarea { font-size: 16px; }
+  .op-toast-wrap { left: 12px; right: 12px; }
+  .op-toast { max-width: none; }
+}
 
 @media print {
   .op-topbar, .op-toast-wrap, .no-print { display: none !important; }
