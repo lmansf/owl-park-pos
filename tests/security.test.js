@@ -147,6 +147,53 @@ test('security: attempted usernames are truncated in the audit trail', async (t)
   assert.ok(JSON.parse(row.detail).username.length <= 64);
 });
 
+test('security: change-password shares the login throttle and lockout', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const cashier = client(base);
+  await cashier('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+
+  // a stolen cookie must not be an unthrottled password oracle: the login
+  // already used one limiter slot, so the 20th probe overflows the window
+  const statuses = [];
+  let firstError = null;
+  for (let i = 0; i < 20; i++) {
+    const r = await cashier('POST', '/api/auth/change-password', {
+      current_password: `wrong-${i}`, new_password: 'longenough-pass',
+    });
+    if (firstError === null) firstError = r.data.error;
+    statuses.push(r.status);
+  }
+  assert.deepEqual(statuses.slice(0, 19), Array(19).fill(403));
+  assert.equal(firstError, 'bad_current_password');
+  assert.equal(statuses[19], 429);
+
+  // wrong current passwords count toward the account lockout
+  const row = db.prepare("SELECT locked_until FROM users WHERE username = 'cashier'").get();
+  assert.ok(row.locked_until, 'repeated wrong current passwords lock the account');
+});
+
+test('security: approver probes are rate-limited per IP', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const cashier = client(base);
+  await cashier('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+
+  // unknown approver usernames never lock an account, so only the per-IP
+  // limiter stands between a seller session and unbounded scrypt burn
+  const statuses = [];
+  for (let i = 0; i < 25; i++) {
+    const r = await cashier('POST', '/api/pos/orders/999999/void', {
+      approver: { username: `ghost-${i}`, password: 'nope' },
+    });
+    statuses.push(r.status);
+  }
+  assert.deepEqual(statuses.slice(0, 20), Array(20).fill(403));
+  assert.deepEqual(statuses.slice(20), Array(5).fill(429));
+  const locked = db.prepare('SELECT COUNT(*) n FROM users WHERE locked_until IS NOT NULL').get().n;
+  assert.equal(locked, 0, 'unknown approver names must not lock real accounts');
+});
+
 test('security: static file traversal stays forbidden (regression guard)', async (t) => {
   const { server, base } = await startServer();
   t.after(() => server.close());

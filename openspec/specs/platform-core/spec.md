@@ -41,10 +41,12 @@ matches the user's row is dead. Cookies SHALL be `HttpOnly; SameSite=Strict` wit
 `Max-Age` matching the 12h token expiry, and `Secure` in production mode or on HTTPS
 hosts.
 
-Login SHALL be rate-limited per IP before any password hashing (429 with `Retry-After`),
-and accounts SHALL lock for 15 minutes after 5 consecutive failures. All login failures
-— unknown username, wrong password, locked account — SHALL return one identical generic
-401, cost equivalent hashing work, and append an audit row.
+Login and the current-password check on `/api/auth/change-password` SHALL be
+rate-limited per IP before any password hashing (429 with `Retry-After`), and failed
+current-password attempts SHALL count toward the account's lockout counters. Accounts
+SHALL lock for 15 minutes after 5 consecutive failures. All login failures — unknown
+username, wrong password, locked account — SHALL return one identical generic 401,
+cost equivalent hashing work, and append an audit row.
 
 #### Scenario: Cashier cannot administer catalog
 - **WHEN** a user with role `cashier` calls `POST /api/catalog/products`

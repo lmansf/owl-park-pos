@@ -111,7 +111,8 @@ function audit(db, userId, action, detail) {
 }
 
 // Shared credential check for login and manager re-auth: same lockout counters,
-// same audit trail, same timing profile (dummy verify when the user is unknown).
+// same audit trail, same timing profile (dummy verify when the user is unknown
+// or locked, so response timing never reveals lock state or username existence).
 // Failure detail never says why — callers surface one generic error. Counter
 // updates are single atomic UPDATEs (SQLite serializes writers; no JS read-
 // modify-write races). Returns { ok:true, user } or { ok:false }.
@@ -121,6 +122,7 @@ function verifyCredential(db, rawUsername, rawPassword, ip) {
     .prepare('SELECT * FROM users WHERE username = ? AND active = 1')
     .get(username);
   if (user && user.locked_until && user.locked_until > now()) {
+    verifyPassword(String(rawPassword || ''), DUMMY_HASH);
     audit(db, user.id, 'auth.login_locked', { username: user.username, ip });
     return { ok: false };
   }
@@ -155,12 +157,14 @@ function verifyManagerCredential(db, cred, ip) {
   return publicUser(r.user);
 }
 
-function mount(router, db, config) {
-  // Fixed-window per-IP limiter, closure-scoped so parallel createApp instances
-  // (tests, serverless warm starts) never share state. Pruned inline — no
-  // setInterval, which would keep test processes alive and is serverless-hostile.
+// Fixed-window per-IP limiter factory. Each caller gets its own closure-scoped
+// bucket so parallel createApp instances (tests, serverless warm starts) never
+// share state, and login vs. approver traffic can't starve each other. Pruned
+// inline — no setInterval, which would keep test processes alive and is
+// serverless-hostile. The returned guard runs before any scrypt work.
+function createRateLimiter() {
   const attempts = new Map(); // ip -> { count, windowStart }
-  function rateLimit(req, res) {
+  return function rateLimit(req, res) {
     const ip = req.socket?.remoteAddress || 'unknown';
     const t = Date.now();
     for (const [k, v] of attempts) {
@@ -174,7 +178,11 @@ function mount(router, db, config) {
       throw new ApiError(429, 'too_many_attempts', 'Too many attempts — try again shortly');
     }
     return ip;
-  }
+  };
+}
+
+function mount(router, db, config) {
+  const rateLimit = createRateLimiter();
 
   function issueCookie(res, user) {
     const token = signToken(
@@ -207,17 +215,22 @@ function mount(router, db, config) {
   }));
 
   // The only mutating route allowed while must_change_password = 1 (see the
-  // router guard in main.js). Bumps token_epoch — revoking every other session —
-  // and re-issues the caller's cookie at the new epoch in the same response.
+  // router guard in main.js). The current-password check shares the login
+  // limiter and lockout counters — a stolen session cookie must not become an
+  // unthrottled password oracle. Bumps token_epoch — revoking every other
+  // session — and re-issues the caller's cookie at the new epoch in the same
+  // response.
   router.post('/api/auth/change-password', [], (req, res) => {
+    const ip = rateLimit(req, res); // before any DB lookup or scrypt work
     const { current_password, new_password } = req.body || {};
     if (typeof current_password !== 'string' || typeof new_password !== 'string') {
       throw new ApiError(400, 'bad_input', 'current_password and new_password are required');
     }
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-    if (!verifyPassword(current_password, user.pass_hash)) {
+    const r = verifyCredential(db, req.user.username, current_password, ip);
+    if (!r.ok) {
       throw new ApiError(403, 'bad_current_password', 'Current password is incorrect');
     }
+    const user = r.user;
     if (new_password.length < 8) {
       throw new ApiError(400, 'weak_password', 'New password must be at least 8 characters');
     }
@@ -262,6 +275,6 @@ function publicUser(u) {
 }
 
 module.exports = {
-  mount, resolveUser, resolveConfig, verifyManagerCredential,
+  mount, resolveUser, resolveConfig, verifyManagerCredential, createRateLimiter,
   hashPassword, verifyPassword, randomCode, audit,
 };

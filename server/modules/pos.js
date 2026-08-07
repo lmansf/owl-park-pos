@@ -4,7 +4,7 @@
 // mutates event_sessions.sold — the online store must call it too.
 const { ApiError } = require('../core/http');
 const { tx, now } = require('../core/db');
-const { audit, randomCode, verifyManagerCredential } = require('../core/auth');
+const { audit, randomCode, verifyManagerCredential, createRateLimiter } = require('../core/auth');
 
 const SELL = ['cashier', 'manager', 'admin'];
 const DAY_MS = (24 * 3600 * 1000);
@@ -362,6 +362,10 @@ function refundOrder(db, ctx, orderId, userId, approverId) {
 
 function mount(router, ctx) {
   const db = ctx.db;
+  // Per-IP throttle for the approver re-auth path: unknown approver usernames
+  // never lock an account but still cost a full scrypt, so without this an
+  // authenticated seller could burn CPU with unbounded void/refund attempts.
+  const approverRateLimit = createRateLimiter();
 
   // Create an open order (priced server-side). Body:
   // {lines:[{product_id, qty, event_session_id?, member?}], discount_code?, customer?}
@@ -407,9 +411,11 @@ function mount(router, ctx) {
 
   // Void an unpaid (open) order — any seller, with manager re-auth: the body
   // must carry approver {username, password} resolving to an active manager or
-  // admin. The credential is verified (and counts toward the approver's lockout)
-  // before the transaction opens; the password itself is never logged.
-  router.post('/api/pos/orders/:id/void', SELL, (req) => {
+  // admin. The credential is rate-limited per IP and verified (counting toward
+  // the approver's lockout) before the transaction opens; the password itself
+  // is never logged.
+  router.post('/api/pos/orders/:id/void', SELL, (req, res) => {
+    approverRateLimit(req, res);
     const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
     return tx(db, () => {
       const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id));
@@ -424,7 +430,8 @@ function mount(router, ctx) {
   });
 
   // Full refund of a paid order — any seller, with the same manager re-auth.
-  router.post('/api/pos/orders/:id/refund', SELL, (req) => {
+  router.post('/api/pos/orders/:id/refund', SELL, (req, res) => {
+    approverRateLimit(req, res);
     const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
     return refundOrder(db, ctx, Number(req.params.id), req.user.id, approver.id);
   });

@@ -45,8 +45,9 @@ Any seller (cashier/manager/admin) SHALL be able to void an unpaid order and ref
 paid order (full refund only) — but only with manager re-authentication: the request
 body must carry `approver: {username, password}` resolving to an active `manager` or
 `admin`. All approver failure modes (missing, unknown, wrong password, wrong role,
-locked) SHALL return one generic 403 `approval_required`, and approver attempts SHALL
-count toward the approver account's lockout counters. Effects are unchanged: status
+locked) SHALL return one generic 403 `approval_required`; approver attempts SHALL
+count toward the approver account's lockout counters and SHALL be rate-limited per IP
+(429) before any password hashing. Effects are unchanged: status
 change, tickets → void, session sold counts decremented, negative payment row. The audit
 row SHALL record both the session user and `approved_by` (the approver's user id), never
 the credential itself. Refunded tickets scan as denied thereafter.
