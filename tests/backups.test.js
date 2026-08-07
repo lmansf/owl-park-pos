@@ -158,10 +158,10 @@ test('backups: snapshot, rotation, concurrency, restore, security', async (t) =>
 
   await t.test('health hides disk fields from anon/cashier/gate', async () => {
     const anonHealth = (await client(base)('GET', '/api/health')).data;
-    assert.deepEqual(Object.keys(anonHealth).sort(), ['ephemeral', 'ok']);
+    assert.deepEqual(Object.keys(anonHealth).sort(), ['ephemeral', 'mode', 'ok']);
     for (const c of [cashier, gate]) {
       const h = (await c('GET', '/api/health')).data;
-      assert.deepEqual(Object.keys(h).sort(), ['ephemeral', 'ok']);
+      assert.deepEqual(Object.keys(h).sort(), ['ephemeral', 'mode', 'ok']);
     }
     const mgr = (await manager('GET', '/api/health')).data;
     assert.ok(mgr.disk_free_bytes > 0 && mgr.db_bytes > 0);
