@@ -73,6 +73,30 @@ which becomes display-only.
 - **THEN** the new member is created from the line's `member_intent` payload and the
   description is never parsed.
 
+### Requirement: Per-unit posted member records
+
+`order_lines.member_id` can hold only one member while a qty>1 membership line posts
+one member per unit, so `finalizeOrder` SHALL record every member a line actually
+posted in `order_line_members` — one row per unit, marked `minted` (a member this
+order created) or `renewed` (an existing member extended). Refunding q units of a
+membership line SHALL reverse exactly q posted memberships from that set, most
+recently posted first: a minted member is suspended, a renewed member gives back one
+program duration. Order views (back office and guest) SHALL list every member posted
+on the line. `member_id` SHALL stay stamped with the last posted member for
+compatibility with anything still joining through it, and the migration SHALL
+backfill link rows for already-posted lines from that stamp so historical refunds
+keep working.
+
+#### Scenario: Qty-2 line refunds deterministically
+- **WHEN** a qty-2 membership line minted members A then B and one unit is refunded
+- **THEN** B (the most recently minted) is suspended while A keeps its full term, and
+  refunding the remaining unit suspends A too.
+
+#### Scenario: Qty-2 purchase delivers two pass cards
+- **WHEN** a guest buys a qty-2 membership line online
+- **THEN** the confirmation shows both minted members' pass cards, not just the last
+  one stamped on the line.
+
 ### Requirement: Legacy line backfill
 
 The migration SHALL best-effort backfill structured columns from the legacy

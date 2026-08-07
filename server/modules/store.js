@@ -83,48 +83,58 @@ function guestOrderView(db, order) {
     )
     .all(order.id);
 
-  // Membership lines: resolve the member the shared posting path created/renewed —
-  // finalize stamps order_lines.member_id, so it is a plain join. Rows from before
-  // the member-order-lines migration may have no member_id; the backfilled
-  // member_intent email (the gift recipient on "(for ...)" lines) or, failing that,
-  // the order email identifies the member, so look it up by that.
+  // Membership lines: resolve EVERY member the shared posting path created/renewed —
+  // finalize records one order_line_members row per unit, so a qty-2 purchase shows
+  // both pass cards. Rows from before the member-order-lines migrations may have no
+  // link rows; the stamped member_id, the backfilled member_intent email (the gift
+  // recipient on "(for ...)" lines) or, failing that, the order email identifies the
+  // member, so fall back to that lookup.
   const members = [];
   const seen = new Set();
+  const postedMembers = db.prepare(
+    `SELECT m.* FROM order_line_members olm
+     JOIN members m ON m.id = olm.member_id
+     WHERE olm.order_line_id = ? ORDER BY olm.id`
+  );
   for (const l of lines) {
     if (l.product_kind !== 'membership') continue;
-    let member = null;
-    if (l.member_id) {
-      member = db.prepare('SELECT * FROM members WHERE id = ?').get(l.member_id);
-    } else {
-      let email = '';
-      if (l.member_intent) {
-        try {
-          email = String(JSON.parse(l.member_intent).email || '').trim();
-        } catch {
-          email = '';
+    let lineMembers = postedMembers.all(l.id);
+    if (!lineMembers.length) {
+      let member = null;
+      if (l.member_id) {
+        member = db.prepare('SELECT * FROM members WHERE id = ?').get(l.member_id);
+      } else {
+        let email = '';
+        if (l.member_intent) {
+          try {
+            email = String(JSON.parse(l.member_intent).email || '').trim();
+          } catch {
+            email = '';
+          }
+        }
+        if (!email && order.customer_email) email = String(order.customer_email).trim();
+        if (email) {
+          member = db
+            .prepare(
+              `SELECT * FROM members WHERE lower(email) = lower(?) AND program_id = ?
+               ORDER BY id LIMIT 1`
+            )
+            .get(email, l.membership_program_id);
         }
       }
-      if (!email && order.customer_email) email = String(order.customer_email).trim();
-      if (email) {
-        member = db
-          .prepare(
-            `SELECT * FROM members WHERE lower(email) = lower(?) AND program_id = ?
-             ORDER BY id LIMIT 1`
-          )
-          .get(email, l.membership_program_id);
+      if (member) lineMembers = [member];
+    }
+    for (const member of lineMembers) {
+      // Reveal gate: a pass (incl. its gate credential) is only shown when the member's
+      // email matches the order email, or the member was minted by this very order —
+      // an arbitrary member id on a line must never leak someone else's pass code.
+      if (
+        String(member.email).toLowerCase() !== String(order.customer_email).toLowerCase() &&
+        Date.parse(member.joined_at) < Date.parse(order.created_at)
+      ) {
+        continue;
       }
-    }
-    // Reveal gate: a pass (incl. its gate credential) is only shown when the member's
-    // email matches the order email, or the member was minted by this very order —
-    // an arbitrary member id on a line must never leak someone else's pass code.
-    if (
-      member &&
-      String(member.email).toLowerCase() !== String(order.customer_email).toLowerCase() &&
-      Date.parse(member.joined_at) < Date.parse(order.created_at)
-    ) {
-      member = null;
-    }
-    if (member && !seen.has(member.id)) {
+      if (seen.has(member.id)) continue;
       seen.add(member.id);
       // Second gate — the credential itself. The order email is UNVERIFIED guest
       // input, so an email match is not proof of ownership: anyone who knows a

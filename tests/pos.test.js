@@ -848,8 +848,10 @@ test('pos: member-order-lines migration backfills legacy descriptions', async (t
   const dbPath = tempDb();
   const migrationsDir = path.join(__dirname, '..', 'server', 'migrations');
   const partialDir = fs.mkdtempSync(path.join(os.tmpdir(), 'op-mig-'));
-  // 010 repairs what 005 wrote, so it belongs to the same change: hold both back.
-  const held = (f) => f.includes('member-order-lines') || f.includes('member-backfill-repair');
+  // 010 repairs what 005 wrote and 011 links off 005's member_id column, so they
+  // belong to the same change: hold all three back.
+  const held = (f) => f.includes('member-order-lines') || f.includes('member-backfill-repair')
+    || f.includes('order-line-members');
   for (const f of fs.readdirSync(migrationsDir)) {
     if (!held(f)) fs.copyFileSync(path.join(migrationsDir, f), path.join(partialDir, f));
   }

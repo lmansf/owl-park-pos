@@ -135,3 +135,64 @@ test('migration 010: repairs the 005 member backfill mis-parse', async (t) => {
     assert.equal(line(paidLineId).member_id, issued);
   });
 });
+
+const LINKS = '011_order-line-members.sql';
+
+test('migration 011: backfills posted membership lines into order_line_members', async (t) => {
+  const { server, db, ctx } = createApp(tempDb());
+  t.after(() => server.close());
+  const pos = ctx.modules.pos;
+  const memExp = db.prepare("SELECT * FROM products WHERE sku = 'MEM-EXP'").get();
+  const pay = (order) =>
+    pos.finalizeOrder(db, ctx, order.id, [{ method: 'card_sim', amount_cents: order.total_cents }]);
+
+  // a posted qty-2 gift line and a posted qty-2 renewal, as the live path writes them
+  const gifted = pos.createOrder(db, ctx, {
+    lines: [{ product_id: memExp.id, qty: 2, member: { name: 'Pair', email: 'pair@bf.test' } }],
+  }, 'pos');
+  pay(gifted);
+  const existing = ctx.modules.membership.createOrRenewMember(db, {
+    program_id: memExp.membership_program_id, name: 'Long Timer', email: 'long@bf.test',
+  });
+  const renewal = pos.createOrder(db, ctx, {
+    lines: [{ product_id: memExp.id, qty: 2, member: { member_id: existing.id } }],
+  }, 'pos');
+  pay(renewal);
+  // an OPEN renewal order: its member_id is a target, not a posting record
+  const open = pos.createOrder(db, ctx, {
+    lines: [{ product_id: memExp.id, qty: 1, member: { member_id: existing.id } }],
+  }, 'pos');
+
+  // simulate a pre-011 database: only the single stamped member_id survives
+  db.exec('DROP TABLE order_line_members');
+  db.prepare('DELETE FROM schema_migrations WHERE name = ?').run(LINKS);
+  migrate(db, MIGRATIONS);
+
+  const rows = (order) => db.prepare(
+    'SELECT member_id, action FROM order_line_members WHERE order_line_id = ? ORDER BY id'
+  ).all(order.lines[0].id);
+
+  await t.test('a posted minted line gets qty rows: minted first, renewals after', () => {
+    const stamped = db.prepare('SELECT member_id FROM order_lines WHERE id = ?')
+      .get(gifted.lines[0].id).member_id;
+    assert.deepEqual(rows(gifted), [
+      { member_id: stamped, action: 'minted' },
+      { member_id: stamped, action: 'renewed' },
+    ]);
+  });
+
+  await t.test('a posted renewal line gets qty renewed rows', () => {
+    assert.deepEqual(rows(renewal), [
+      { member_id: existing.id, action: 'renewed' },
+      { member_id: existing.id, action: 'renewed' },
+    ]);
+  });
+
+  await t.test('open orders are skipped — finalize writes their rows when they post', () => {
+    assert.deepEqual(rows(open), []);
+    assert.equal(
+      db.prepare('SELECT member_id FROM order_lines WHERE id = ?').get(open.lines[0].id).member_id,
+      existing.id
+    );
+  });
+});

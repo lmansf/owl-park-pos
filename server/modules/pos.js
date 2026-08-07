@@ -141,6 +141,26 @@ function getOrderDetail(db, id) {
        WHERE ol.order_id = ? ORDER BY ol.id`
     )
     .all(id);
+  // every member each membership line posted, not just the last one stamped
+  const memberRows = db
+    .prepare(
+      `SELECT olm.order_line_id, olm.member_id, olm.action,
+              m.member_no, m.name, m.status, m.expires_at
+       FROM order_line_members olm
+       JOIN order_lines ol ON ol.id = olm.order_line_id
+       JOIN members m ON m.id = olm.member_id
+       WHERE ol.order_id = ? ORDER BY olm.id`
+    )
+    .all(id);
+  for (const l of order.lines) {
+    const posted = memberRows.filter((r) => r.order_line_id === l.id);
+    if (posted.length) {
+      l.members = posted.map((r) => ({
+        member_id: r.member_id, action: r.action, member_no: r.member_no,
+        name: r.name, status: r.status, expires_at: r.expires_at,
+      }));
+    }
+  }
   order.payments = db
     .prepare('SELECT * FROM payments WHERE order_id = ? ORDER BY id')
     .all(id);
@@ -420,6 +440,16 @@ function finalizeOrder(db, ctx, orderId, payments, actorId) {
     // order so repeat units still get their own membership.
     const members = [];
     const stampMember = db.prepare('UPDATE order_lines SET member_id = ? WHERE id = ?');
+    // One order_line_members row per unit posted: member_id can stamp only the LAST
+    // member, so refunds and the order/guest views consume this set instead.
+    const insLineMember = db.prepare(
+      'INSERT INTO order_line_members (order_line_id, member_id, action) VALUES (?, ?, ?)'
+    );
+    const activeByEmail = db.prepare(
+      `SELECT id FROM members
+       WHERE status = 'active' AND lower(email) = lower(?) AND program_id = ?
+       ORDER BY id LIMIT 1`
+    );
     const renewedByEmail = new Set();
     for (const l of lines) {
       if (l.kind !== 'membership') continue;
@@ -431,6 +461,14 @@ function finalizeOrder(db, ctx, orderId, payments, actorId) {
       for (let i = 0; i < l.qty; i++) {
         const renewByEmail = !l.member_id && !intent && email && !renewedByEmail.has(emailKey);
         if (renewByEmail) renewedByEmail.add(emailKey);
+        // same lookup createOrRenewMember does, so 'renewed' vs 'minted' is recorded
+        // exactly as the module is about to act (renew-by-email with no active match
+        // falls through to a create)
+        const renews = l.member_id
+          ? true
+          : renewByEmail
+            ? Boolean(activeByEmail.get(String(email), l.membership_program_id))
+            : false;
         member = l.member_id || renewByEmail
           ? ctx.modules.membership.createOrRenewMember(db, {
             program_id: l.membership_program_id,
@@ -440,6 +478,7 @@ function finalizeOrder(db, ctx, orderId, payments, actorId) {
           })
           : createFreshMember(db, ctx, { program_id: l.membership_program_id, name, email });
         members.push(member);
+        insLineMember.run(l.id, member.id, renews ? 'renewed' : 'minted');
       }
       // stamp the posted member so the line stays joinable (reports, guest view)
       if (member && member.id !== l.member_id) stampMember.run(member.id, l.id);
@@ -636,35 +675,43 @@ function refundOrder(db, ctx, orderId, userId, approverId, selection) {
     // --- memberships: a refunded membership must stop admitting --------------
     // Money back and a live pass is a free year at the gate (admissions.checkMember
     // only looks at status/expiry, and nothing else in the app reverses a sale).
-    // finalize stamped the member this line posted, so: a member this order MINTED is
-    // suspended outright — revoked, and a manager can reinstate from /members.html if
-    // the refund was a mistake — while a pre-existing member this order RENEWED only
-    // gives back the duration that was refunded, keeping the time they still paid for.
+    // finalize recorded EVERY member the line posted in order_line_members (one row
+    // per unit), so refunding q units reverses exactly q of them, most recently
+    // posted first — deterministic, never just whichever member happened to be
+    // stamped last. A 'minted' row suspends its member outright (a manager can
+    // reinstate from /members.html if the refund was a mistake); a 'renewed' row
+    // gives back one program duration, keeping the time still paid for. Rows earlier
+    // refunds already reversed — the first refunded_qty in that same reverse order —
+    // are skipped.
     const revokedMembers = [];
+    const postedMembers = db.prepare(
+      `SELECT member_id, action FROM order_line_members
+       WHERE order_line_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`
+    );
     for (const p of picks) {
       const { line, q } = p;
-      if (line.kind !== 'membership' || !line.member_id) continue;
-      const member = db.prepare('SELECT * FROM members WHERE id = ?').get(line.member_id);
-      if (!member) continue;
-      const minted =
-        order.paid_at && Date.parse(member.joined_at) >= Date.parse(order.paid_at);
-      if (minted && line.refunded_qty + q >= line.qty) {
-        db.prepare("UPDATE members SET status = 'suspended' WHERE id = ?").run(member.id);
-        revokedMembers.push({ id: member.id, member_no: member.member_no, action: 'suspended' });
-        continue;
+      if (line.kind !== 'membership') continue;
+      for (const posted of postedMembers.all(line.id, q, line.refunded_qty)) {
+        const member = db.prepare('SELECT * FROM members WHERE id = ?').get(posted.member_id);
+        if (!member) continue;
+        if (posted.action === 'minted') {
+          db.prepare("UPDATE members SET status = 'suspended' WHERE id = ?").run(member.id);
+          revokedMembers.push({ id: member.id, member_no: member.member_no, action: 'suspended' });
+          continue;
+        }
+        const program = db
+          .prepare('SELECT duration_days FROM membership_programs WHERE id = ?')
+          .get(member.program_id);
+        if (!program) continue;
+        const expiresAt = new Date(
+          Date.parse(member.expires_at) - program.duration_days * DAY_MS
+        ).toISOString();
+        db.prepare('UPDATE members SET expires_at = ? WHERE id = ?').run(expiresAt, member.id);
+        revokedMembers.push({
+          id: member.id, member_no: member.member_no,
+          action: 'expiry_rolled_back', expires_at: expiresAt,
+        });
       }
-      const program = db
-        .prepare('SELECT duration_days FROM membership_programs WHERE id = ?')
-        .get(member.program_id);
-      if (!program) continue;
-      const expiresAt = new Date(
-        Date.parse(member.expires_at) - q * program.duration_days * DAY_MS
-      ).toISOString();
-      db.prepare('UPDATE members SET expires_at = ? WHERE id = ?').run(expiresAt, member.id);
-      revokedMembers.push({
-        id: member.id, member_no: member.member_no,
-        action: 'expiry_rolled_back', expires_at: expiresAt,
-      });
     }
 
     // --- refund event + per-line progress ------------------------------------
