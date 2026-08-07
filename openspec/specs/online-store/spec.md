@@ -1,7 +1,9 @@
 # online-store Specification
 
 ## Purpose
-TBD - created by archiving change pos-mvp. Update Purpose after archive.
+Guest web store: anonymous storefront where visitors browse tickets and memberships,
+check out with simulated payment, and receive their codes — all posting through the same
+`pos.finalizeOrder` path as the desk POS.
 ## Requirements
 ### Requirement: Anonymous guest storefront
 

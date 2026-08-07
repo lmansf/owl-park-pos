@@ -1,7 +1,9 @@
 # catalog-pricing Specification
 
 ## Purpose
-TBD - created by archiving change pos-mvp. Update Purpose after archive.
+Product catalog and base pricing: manager-maintained products (tickets, memberships,
+addons) with integer-cent prices, tax rates, and active flags — the source of truth every
+selling surface (POS, web store) reads from.
 ## Requirements
 ### Requirement: Product catalog CRUD
 

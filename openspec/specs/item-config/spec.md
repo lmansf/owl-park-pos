@@ -1,7 +1,8 @@
 # item-config Specification
 
 ## Purpose
-TBD - created by archiving change back-office-builders. Update Purpose after archive.
+Standalone per-product editor: a single page that edits every attribute of one product
+(identity, pricing, tax, availability, grouping) without leaving the item's context.
 ## Requirements
 ### Requirement: Standalone item editor
 

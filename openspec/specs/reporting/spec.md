@@ -1,7 +1,8 @@
 # reporting Specification
 
 ## Purpose
-TBD - created by archiving change pos-mvp. Update Purpose after archive.
+Reporting: the back-office dashboard and daily sales/admissions reports, bucketed by
+server-local day, derived read-only from orders, payments, tickets, and admits.
 ## Requirements
 ### Requirement: Dashboard
 

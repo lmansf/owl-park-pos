@@ -1,7 +1,9 @@
 # events-capacity Specification
 
 ## Purpose
-TBD - created by archiving change pos-mvp. Update Purpose after archive.
+Timed events and session capacity: manager-defined events with dated sessions and hard
+capacity limits, where sold counts move only through `pos.finalizeOrder` so a session can
+never oversell.
 ## Requirements
 ### Requirement: Events with timed sessions
 

@@ -1,7 +1,8 @@
 # item-groups Specification
 
 ## Purpose
-TBD - created by archiving change back-office-builders. Update Purpose after archive.
+Item grouping: named, sorted, color-coded groups that organize products for the POS grid,
+menu builder, and reporting rollups.
 ## Requirements
 ### Requirement: Group management
 

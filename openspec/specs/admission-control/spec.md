@@ -1,7 +1,9 @@
 # admission-control Specification
 
 ## Purpose
-TBD - created by archiving change pos-mvp. Update Purpose after archive.
+Gate admission scanning: validate ticket and member codes through the single
+`admissions.checkCode` chokepoint, record every scan as an `admits` row, and give gate
+staff a fast scan UI with clear ok/deny feedback.
 ## Requirements
 ### Requirement: Single validation entry point
 

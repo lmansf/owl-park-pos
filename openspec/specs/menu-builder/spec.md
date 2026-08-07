@@ -1,7 +1,8 @@
 # menu-builder Specification
 
 ## Purpose
-TBD - created by archiving change back-office-builders. Update Purpose after archive.
+POS menu design: pages and positioned buttons that lay out the sell screen's grid, with a
+fallback auto-grid when no menu is defined.
 ## Requirements
 ### Requirement: Menu designer
 

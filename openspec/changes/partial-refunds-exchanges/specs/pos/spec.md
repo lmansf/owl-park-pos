@@ -28,7 +28,10 @@ A valid timed-entry ticket SHALL be exchangeable to another session of the same 
 with available capacity, in one transaction: old ticket → void, new ticket issued
 referencing the original, old session sold decremented, new session sold incremented
 (rejecting the exchange when the target session is full). No money moves for same-priced
-exchanges.
+exchanges. The replacement ticket SHALL be issued through the same internal issuance and
+capacity routine that backs `pos.finalizeOrder`, so ticket issuance and session-capacity
+movement remain a single chokepoint inside the pos module rather than a second
+independent path.
 
 #### Scenario: Exchange respects capacity
 - **WHEN** a ticket is exchanged to a session with zero remaining capacity

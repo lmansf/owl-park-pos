@@ -1,7 +1,9 @@
 # chart-of-accounts Specification
 
 ## Purpose
-TBD - created by archiving change back-office-builders. Update Purpose after archive.
+Lightweight general-ledger layer: GL accounts, product-to-account revenue mapping, and a
+balanced daily journal view so sales activity can be handed to bookkeeping without a full
+accounting system.
 ## Requirements
 ### Requirement: Account management
 

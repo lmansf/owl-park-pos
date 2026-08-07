@@ -1,7 +1,9 @@
 # platform-core Specification
 
 ## Purpose
-TBD - created by archiving change pos-mvp. Update Purpose after archive.
+Platform foundation: the zero-dependency Node 22 server, SQLite storage with core-owned
+migrations, session auth and roles, module registry with graceful degradation, and the
+shared HTTP/JSON conventions every module builds on.
 ## Requirements
 ### Requirement: Zero-dependency local server
 

@@ -1,7 +1,9 @@
 # price-programs Specification
 
 ## Purpose
-TBD - created by archiving change back-office-builders. Update Purpose after archive.
+Price programs: date-ranged, prioritized per-product price overrides resolved through the
+frozen `resolvePrice` contract, so seasonal and promotional pricing never edits base
+catalog prices.
 ## Requirements
 ### Requirement: Program management
 

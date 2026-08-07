@@ -1,7 +1,9 @@
 # pos Specification
 
 ## Purpose
-TBD - created by archiving change pos-mvp. Update Purpose after archive.
+Point of sale: the touch-first sell screen and order lifecycle — build, tender, and
+finalize orders through `pos.finalizeOrder`, the only path that marks orders paid, issues
+tickets, and moves session capacity.
 ## Requirements
 ### Requirement: Touch-first sell screen
 

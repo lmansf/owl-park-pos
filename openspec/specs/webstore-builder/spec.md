@@ -1,7 +1,8 @@
 # webstore-builder Specification
 
 ## Purpose
-TBD - created by archiving change back-office-builders. Update Purpose after archive.
+Web store builder: back-office editor for the guest storefront's landing layout (hero,
+sections, featured products) with a static fallback when no layout is published.
 ## Requirements
 ### Requirement: Store layout editor
 

@@ -1,7 +1,9 @@
 # membership Specification
 
 ## Purpose
-TBD - created by archiving change pos-mvp. Update Purpose after archive.
+Memberships: programs, member records with scannable member codes, and purchase/renewal
+through the normal order flow, so members are sold and admitted with the same chokepoints
+as tickets.
 ## Requirements
 ### Requirement: Membership programs
 
