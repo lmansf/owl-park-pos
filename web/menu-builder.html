@@ -7,7 +7,8 @@
 <link rel="stylesheet" href="/shell.css">
 <style>
   .mb-layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; align-items: start; }
-  @media (max-width: 980px) { .mb-layout { grid-template-columns: 1fr; } }
+  @media (max-width: 980px) { .mb-layout { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 640px) { .mb-head, .checks { flex-wrap: wrap; } }
   .mb-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
   .mb-head h2 { margin: 0; }
   .page-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; cursor: pointer; }
@@ -20,6 +21,7 @@
   .swatch { display: inline-block; width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--line); vertical-align: -3px; }
   .table-wrap { overflow-x: auto; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  @media (max-width: 560px) { .form-grid { grid-template-columns: 1fr; } }
   .form-grid .full { grid-column: 1 / -1; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
   .checks { display: flex; gap: 16px; padding: 6px 0; }
