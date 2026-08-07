@@ -42,6 +42,15 @@
 
   <div class="kpi-row" id="kpis"></div>
 
+  <div class="op-card" id="by-group-card" hidden>
+    <h2>Sales by group today</h2>
+    <p class="op-muted">order revenue incl. tax, by item group — sales, not payments</p>
+    <table class="op-table" id="by-group-table">
+      <thead><tr><th>Group</th><th class="num">Revenue</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
   <div class="op-card">
     <h2>Next sessions</h2>
     <table class="op-table" id="sessions-table">
@@ -84,6 +93,12 @@
         `in-park estimate · ${d.admits_denied_today} denied`),
       tile('Active members', String(d.members_active), 'across all programs'),
     ].join('');
+
+    const byGroup = d.revenue_by_group_today || [];
+    document.getElementById('by-group-card').hidden = !byGroup.length;
+    document.querySelector('#by-group-table tbody').innerHTML = byGroup.map((g) => `
+      <tr><td>${op.esc(g.group)}</td>
+          <td class="num">${op.esc(op.money(g.revenue_cents))}</td></tr>`).join('');
 
     const tbody = document.querySelector('#sessions-table tbody');
     if (!d.next_sessions.length) {

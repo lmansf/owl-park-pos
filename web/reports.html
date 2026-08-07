@@ -30,6 +30,11 @@
     <div class="filters">
       <label class="op-field"><span>From</span><input type="date" id="from"></label>
       <label class="op-field"><span>To</span><input type="date" id="to"></label>
+      <label class="op-field" id="groupby-wrap" hidden><span>Group by</span>
+        <select id="groupby">
+          <option value="">None</option>
+          <option value="group">Item group</option>
+        </select></label>
       <button class="op-btn" id="run">Run</button>
       <a class="op-btn secondary" id="csv" href="#" download>Download CSV</a>
     </div>
@@ -45,17 +50,20 @@
   if (!me) return;
 
   const TABS = [
-    { id: 'sales', label: 'Sales summary' },
+    { id: 'sales', label: 'Sales summary', groupable: true },
     { id: 'product-mix', label: 'Product mix' },
-    { id: 'admissions', label: 'Admissions' },
+    { id: 'admissions', label: 'Admissions', groupable: true },
     { id: 'memberships', label: 'Memberships' },
   ];
   let tab = 'sales';
+  const groupable = () => Boolean(TABS.find((t) => t.id === tab)?.groupable);
 
   const fromEl = document.getElementById('from');
   const toEl = document.getElementById('to');
   const out = document.getElementById('out');
   const csvLink = document.getElementById('csv');
+  const groupbyEl = document.getElementById('groupby');
+  const groupbyWrap = document.getElementById('groupby-wrap');
 
   // default range: last 14 days (local)
   const pad = (n) => String(n).padStart(2, '0');
@@ -76,6 +84,7 @@
 
   function url(format) {
     const q = new URLSearchParams({ from: fromEl.value, to: toEl.value });
+    if (groupable() && groupbyEl.value) q.set('group_by', groupbyEl.value);
     if (format) q.set('format', format);
     return `/api/reports/${tab}?${q}`;
   }
@@ -90,7 +99,7 @@
     return String(v);
   }
   const isNum = (col) => /_cents$|_pct$/.test(col) ||
-    !['date', 'channel', 'product', 'sku', 'kind', 'gate', 'program'].includes(col);
+    !['date', 'channel', 'product', 'sku', 'kind', 'gate', 'program', 'group'].includes(col);
 
   function renderSection(s) {
     const head = s.columns.map((c) =>
@@ -109,6 +118,7 @@
         <table class="op-table"><thead><tr>${head}</tr></thead>
         <tbody>${body}${totals}</tbody></table>
       </div>
+      ${s.note ? `<p class="op-muted">${op.esc(s.note)}</p>` : ''}
     </div>`;
   }
 
@@ -116,6 +126,8 @@
     for (const b of tabsEl.querySelectorAll('button')) {
       b.classList.toggle('active', b.dataset.tab === tab);
     }
+    groupbyWrap.hidden = !groupable();
+    if (!groupable()) groupbyEl.value = '';
     csvLink.href = url('csv');
     out.innerHTML = '<p class="op-muted">Loading…</p>';
     let report;
@@ -126,6 +138,7 @@
   }
 
   document.getElementById('run').addEventListener('click', run);
+  groupbyEl.addEventListener('change', run);
   await run();
 })();
 </script>
