@@ -330,9 +330,11 @@
   }
 
   async function removeButton(id) {
+    // reversible in one step (re-add via "New button"), so no confirm — the toast
+    // says exactly how to undo instead
     try {
       await op.api(`/api/menus/buttons/${id}`, { method: 'DELETE' });
-      op.toast('Button removed', 'ok');
+      op.toast('Button removed — re-add it any time with "New button"', 'ok');
       await reload();
     } catch { /* toast shown */ }
   }

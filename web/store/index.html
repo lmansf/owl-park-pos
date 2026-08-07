@@ -23,13 +23,13 @@
   <!-- Static fallback: the original landing page, unchanged for fresh installs. -->
   <div id="static-root">
     <h2 class="st-section">Day tickets &amp; add-ons</h2>
-    <div class="st-grid" id="tickets"></div>
+    <div class="st-grid" id="tickets"><p class="st-muted">Loading…</p></div>
 
     <h2 class="st-section">Timed-entry experiences</h2>
-    <div class="st-grid" id="events"></div>
+    <div class="st-grid" id="events"><p class="st-muted">Loading…</p></div>
 
     <h2 class="st-section">Memberships</h2>
-    <div class="st-grid" id="memberships"></div>
+    <div class="st-grid" id="memberships"><p class="st-muted">Loading…</p></div>
   </div>
 </main>
 
@@ -68,7 +68,8 @@ gs.init('home');
     if (!btn) return;
     const p = byId.get(Number(btn.dataset.add));
     if (!p) return;
-    gs.cartAdd({ product_id: p.id, name: p.name, price_cents: p.price_cents, qty: 1 });
+    gs.cartAdd({ product_id: p.id, name: p.name, price_cents: p.price_cents,
+      tax_rate_bp: p.tax_rate_bp, qty: 1 });
     btn.textContent = 'Added ✓';
     setTimeout(() => { btn.textContent = 'Add to cart'; }, 1200);
   });
@@ -79,6 +80,7 @@ gs.init('home');
     if (settings.hero_title) {
       document.getElementById('venue-name').textContent = settings.hero_title;
       document.title = settings.hero_title + ' — Tickets';
+      gs.setVenue(settings.hero_title); // header brand follows the store's own title
     }
     if (settings.hero_sub) {
       document.getElementById('hero-sub').textContent = settings.hero_sub;
@@ -115,6 +117,7 @@ gs.init('home');
         `<div class="st-error">Could not load the store: ${gs.esc(err.message)}</div>`;
       return;
     }
+    gs.setVenue(cat.venue);
     if (document.title === 'Owl Park — Tickets') {
       document.getElementById('venue-name').textContent = cat.venue;
       document.title = cat.venue + ' — Tickets';

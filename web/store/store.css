@@ -32,6 +32,7 @@ a:hover { text-decoration: underline; }
   padding: 0 18px; height: 56px; position: sticky; top: 0; z-index: 40;
 }
 .st-topbar .brand { font-weight: 700; letter-spacing: .4px; color: #fff; white-space: nowrap; }
+.st-topbar .brand .brand-name { text-transform: uppercase; }
 .st-topbar .brand small { font-weight: 400; color: #aab3e8; margin-left: 6px; }
 .st-topbar nav { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
 .st-topbar nav a { color: #c3caf5; padding: 6px 10px; border-radius: 8px; white-space: nowrap; }

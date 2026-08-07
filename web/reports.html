@@ -130,10 +130,18 @@
     }
     groupbyWrap.hidden = !groupable();
     if (!groupable()) groupbyEl.value = '';
+    if (fromEl.value && toEl.value && fromEl.value > toEl.value) {
+      out.innerHTML = '<p class="op-muted">The From date is after the To date — swap them and run again.</p>';
+      return;
+    }
     csvLink.href = url('csv');
     out.innerHTML = '<p class="op-muted">Loading…</p>';
     let report;
-    try { report = await op.api(url()); } catch { out.innerHTML = ''; return; }
+    try {
+      // busy = no double-fire while a slow range crunches
+      report = await op.busy(document.getElementById('run'), () => op.api(url()), 'Running…');
+      if (!report) return;
+    } catch { out.innerHTML = '<p class="op-muted">Report failed — adjust the range and run again.</p>'; return; }
     out.innerHTML =
       `<p class="op-muted">${op.esc(report.range.from)} → ${op.esc(report.range.to)}</p>` +
       report.sections.map(renderSection).join('');

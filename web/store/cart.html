@@ -5,6 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cart &amp; checkout — Owl Park</title>
 <link rel="stylesheet" href="/store/store.css">
+<style>
+  /* thumb-sized − / + steppers (40px targets) instead of a raw number input */
+  .st-stepper { display: inline-flex; align-items: center; gap: 4px; }
+  .st-stepper button {
+    width: 40px; height: 40px; border: 1px solid var(--line); background: #fff;
+    color: var(--ink); border-radius: 8px; font: inherit; font-size: 18px; cursor: pointer;
+  }
+  .st-stepper button:disabled { opacity: .4; cursor: not-allowed; }
+  .st-stepper .v { min-width: 26px; text-align: center; font-weight: 700; }
+  .st-field-err { display: none; color: var(--err); font-size: 13px; margin-top: 4px; }
+  .st-field.invalid .st-field-err { display: block; }
+  .st-field.invalid input { border-color: var(--err); outline-color: var(--err); }
+  /* phones: drop the redundant unit-price column so qty and Remove stay on screen */
+  @media (max-width: 640px) { .col-price { display: none; } }
+</style>
 </head>
 <body>
 <main class="st-main">
@@ -14,7 +29,7 @@
   <div class="st-panel" id="cart-panel">
     <table class="st-table" id="cart-table">
       <thead>
-        <tr><th>Item</th><th class="num">Price</th><th>Qty</th><th class="num">Amount</th><th></th></tr>
+        <tr><th>Item</th><th class="num col-price">Price</th><th>Qty</th><th class="num">Amount</th><th></th></tr>
       </thead>
       <tbody id="cart-body"></tbody>
     </table>
@@ -33,27 +48,36 @@
       <p id="discount-msg" class="st-muted" style="margin-bottom:0"></p>
     </div>
 
-    <div class="st-panel">
-      <h2 style="margin-top:0">Your details</h2>
-      <label class="st-field"><span>Full name</span><input id="cust-name" autocomplete="name"></label>
-      <label class="st-field"><span>Email (your tickets are retrievable with it)</span>
-        <input id="cust-email" type="email" autocomplete="email"></label>
-    </div>
-
-    <div class="st-panel">
-      <h2 style="margin-top:0">Payment</h2>
-      <p class="st-note">Simulated payment — no real charge. Any well-formed card number is
-        approved; use <strong>4000 0000 0000 0002</strong> to test a declined card.</p>
-      <label class="st-field"><span>Card number</span>
-        <input id="card-number" inputmode="numeric" placeholder="4242 4242 4242 4242" value="4242 4242 4242 4242"></label>
-      <div class="st-totals">
-        <div><span>Subtotal</span><span id="t-sub">$0.00</span></div>
-        <div id="t-disc-row" style="display:none"><span>Discount <span id="t-disc-code"></span></span><span id="t-disc">$0.00</span></div>
-        <div><span>Tax</span><span class="st-muted">calculated at payment</span></div>
-        <div class="grand"><span>Estimated total</span><span id="t-total">$0.00</span></div>
+    <!-- One form = one submit path: Enter in any field, or the Pay button. The
+         handler's disabled-while-submitting guard covers both. -->
+    <form id="checkout-form" novalidate>
+      <div class="st-panel">
+        <h2 style="margin-top:0">Your details</h2>
+        <label class="st-field"><span>Full name</span>
+          <input id="cust-name" autocomplete="name" required>
+          <small class="st-field-err">Please enter your name.</small></label>
+        <label class="st-field"><span>Email (your tickets are retrievable with it)</span>
+          <input id="cust-email" type="email" autocomplete="email" required>
+          <small class="st-field-err">Please enter a valid email address — your tickets are sent to it.</small></label>
       </div>
-      <button class="st-btn big" id="pay-btn" style="margin-top:14px">Pay now</button>
-    </div>
+
+      <div class="st-panel">
+        <h2 style="margin-top:0">Payment</h2>
+        <p class="st-note">Simulated payment — no real charge. Any well-formed card number is
+          approved; use <strong>4000 0000 0000 0002</strong> to test a declined card.</p>
+        <label class="st-field"><span>Card number</span>
+          <input id="card-number" inputmode="numeric" autocomplete="cc-number"
+            placeholder="4242 4242 4242 4242" value="4242 4242 4242 4242" required>
+          <small class="st-field-err">Card numbers are 12–19 digits (spaces and dashes are fine).</small></label>
+        <div class="st-totals">
+          <div><span>Subtotal</span><span id="t-sub">$0.00</span></div>
+          <div id="t-disc-row" style="display:none"><span>Discount <span id="t-disc-code"></span></span><span id="t-disc">$0.00</span></div>
+          <div id="t-tax-row"><span>Tax</span><span id="t-tax" class="st-muted">calculated at payment</span></div>
+          <div class="grand"><span id="t-total-label">Estimated total</span><span id="t-total">$0.00</span></div>
+        </div>
+        <button class="st-btn big" id="pay-btn" style="margin-top:14px">Pay now</button>
+      </div>
+    </form>
   </div>
 </main>
 
@@ -64,20 +88,45 @@ gs.init('cart');
 
 let discount = null; // {code, kind, value}
 
+// Mirrors server pricing exactly (same proportional-discount + per-line tax
+// algorithm as the POS cart), so the displayed total IS the charged total.
+// Cart items written before this page carried tax rates fall back to "+ tax".
 function estimate() {
   const items = gs.cartGet();
-  const sub = items.reduce((a, i) => a + i.price_cents * i.qty, 0);
+  const lines = items.map((i) => ({ gross: i.price_cents * i.qty, rate: i.tax_rate_bp }));
+  const sub = lines.reduce((a, l) => a + l.gross, 0);
   let disc = 0;
   if (discount) {
     disc = discount.kind === 'percent'
       ? Math.round((sub * discount.value) / 100)
       : Math.min(discount.value, sub);
   }
+  const knowRates = lines.every((l) => Number.isInteger(l.rate));
+  let tax = 0;
+  if (knowRates) {
+    let remD = disc, remSub = sub;
+    for (const l of lines) {
+      const d = remSub > 0 ? Math.round(remD * l.gross / remSub) : 0;
+      remD -= d; remSub -= l.gross;
+      tax += Math.round((l.gross - d) * l.rate / 10000);
+    }
+  }
   document.getElementById('t-sub').textContent = gs.money(sub);
   document.getElementById('t-disc-row').style.display = disc ? '' : 'none';
   document.getElementById('t-disc-code').textContent = discount ? discount.code : '';
   document.getElementById('t-disc').textContent = '−' + gs.money(disc);
-  document.getElementById('t-total').textContent = gs.money(sub - disc) + ' + tax';
+  const taxEl = document.getElementById('t-tax');
+  if (knowRates) {
+    taxEl.textContent = gs.money(tax);
+    taxEl.className = '';
+    document.getElementById('t-total-label').textContent = 'Total';
+    document.getElementById('t-total').textContent = gs.money(sub - disc + tax);
+  } else {
+    taxEl.textContent = 'calculated at payment';
+    taxEl.className = 'st-muted';
+    document.getElementById('t-total-label').textContent = 'Estimated total';
+    document.getElementById('t-total').textContent = gs.money(sub - disc) + ' + tax';
+  }
 }
 
 function render() {
@@ -89,20 +138,25 @@ function render() {
   body.innerHTML = items.map((i, idx) => `
     <tr>
       <td>${gs.esc(i.name)}${i.session_label ? `<br><small class="st-muted">${gs.esc(i.session_label)}</small>` : ''}</td>
-      <td class="num">${gs.money(i.price_cents)}</td>
-      <td><input type="number" class="st-qty" min="1" max="20" value="${i.qty}" data-qty="${idx}"></td>
+      <td class="num col-price">${gs.money(i.price_cents)}</td>
+      <td><div class="st-stepper">
+        <button type="button" data-step="-1" data-i="${idx}" aria-label="Fewer" ${i.qty <= 1 ? 'disabled' : ''}>−</button>
+        <span class="v">${i.qty}</span>
+        <button type="button" data-step="1" data-i="${idx}" aria-label="More" ${i.qty >= 20 ? 'disabled' : ''}>+</button>
+      </div></td>
       <td class="num">${gs.money(i.price_cents * i.qty)}</td>
       <td><button class="st-remove" data-remove="${idx}" title="Remove">✕</button></td>
     </tr>`).join('');
   estimate();
 }
 
-document.getElementById('cart-body').addEventListener('change', (e) => {
-  const inp = e.target.closest('[data-qty]');
-  if (!inp) return;
+document.getElementById('cart-body').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-step]');
+  if (!btn) return;
   const items = gs.cartGet();
-  const qty = Math.max(1, Math.min(20, Number(inp.value) || 1));
-  items[Number(inp.dataset.qty)].qty = qty;
+  const i = items[Number(btn.dataset.i)];
+  if (!i) return;
+  i.qty = Math.max(1, Math.min(20, i.qty + Number(btn.dataset.step)));
   gs.cartSave(items);
   render();
 });
@@ -132,16 +186,51 @@ document.getElementById('discount-btn').addEventListener('click', async () => {
   }
   estimate();
 });
+// Enter in the code box applies it (instead of doing nothing)
+document.getElementById('discount-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); document.getElementById('discount-btn').click(); }
+});
 
-document.getElementById('pay-btn').addEventListener('click', async () => {
+// Inline validation mirrors the server checks exactly (store.js checkout: name
+// required, email regex, card 12–19 digits) — it never replaces them, it just
+// catches the two most common 400s before a round trip.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function fieldOk(id, ok) {
+  document.getElementById(id).closest('.st-field').classList.toggle('invalid', !ok);
+  return ok;
+}
+function validateField(id) {
+  const v = document.getElementById(id).value.trim();
+  if (id === 'cust-name') return fieldOk(id, v.length > 0);
+  if (id === 'cust-email') return fieldOk(id, EMAIL_RE.test(v));
+  const digits = v.replace(/[\s-]/g, '');
+  return fieldOk(id, /^\d{12,19}$/.test(digits));
+}
+for (const id of ['cust-name', 'cust-email', 'card-number']) {
+  const el = document.getElementById(id);
+  el.addEventListener('blur', () => { if (el.value.trim()) validateField(id); });
+  el.addEventListener('input', () => {
+    // clear the error as soon as the fix lands — never nag while typing
+    if (el.closest('.st-field').classList.contains('invalid')) validateField(id);
+  });
+}
+
+document.getElementById('checkout-form').addEventListener('submit', async (e) => {
+  e.preventDefault(); // the fetch below is the only submit path
   const errBox = document.getElementById('error');
   errBox.innerHTML = '';
   const btn = document.getElementById('pay-btn');
+  if (btn.disabled) return; // disabled-while-submitting is the double-submit guard
+  const items = gs.cartGet();
+  if (!items.length) return;
+
+  // validate every field so all problems show at once; focus the first bad one
+  const bad = ['cust-name', 'cust-email', 'card-number'].filter((id) => !validateField(id));
+  if (bad.length) { document.getElementById(bad[0]).focus(); return; }
+
   const name = document.getElementById('cust-name').value.trim();
   const email = document.getElementById('cust-email').value.trim();
   const cardNumber = document.getElementById('card-number').value.trim();
-  const items = gs.cartGet();
-  if (!items.length) return;
 
   btn.disabled = true;
   btn.textContent = 'Processing…';
@@ -163,9 +252,16 @@ document.getElementById('pay-btn').addEventListener('click', async () => {
     let msg = gs.esc(err.message);
     if (err.code === 'payment_declined') {
       msg = 'Your card was declined. No charge was made — please try another card.';
+      document.getElementById('card-number').focus();
     } else if (err.code === 'capacity') {
+      // deep-link recovery: back to this cart's own showtime picker when the
+      // session items share one event; the storefront otherwise
+      const eventIds = [...new Set(items.filter((i) => i.event_session_id && i.event_id)
+        .map((i) => i.event_id))];
+      const back = eventIds.length === 1
+        ? `/store/event.html?id=${Number(eventIds[0])}` : '/store/';
       msg = 'Sorry — that showtime just sold out. ' +
-        'Please <a href="/store/">pick another session</a> and try again. Nothing was charged.';
+        `Please <a href="${back}">pick another showtime</a> and try again. Nothing was charged.`;
     }
     errBox.innerHTML = `<div class="st-error">${msg}</div>`;
     window.scrollTo({ top: 0, behavior: 'smooth' });
