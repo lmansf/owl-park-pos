@@ -108,6 +108,14 @@ day and channel; net = gross − discounts), **Product mix**, **Admissions** (sc
 denials by reason, per gate), **Memberships** (sold/renewed, active, upcoming
 expirations).
 
+### Backups (`/backups.html`) — admin only
+Snapshot list with sizes and triggers, a **Back up now** button, disk-space and
+last-backup status, and per-snapshot delete. Snapshots are taken with SQLite's online
+backup API — safe while the server is running — and land in `data/backups/`. A scheduled
+backup runs every 60 minutes by default; the newest 14 snapshots are kept. Restore is
+CLI-only (see the runbook below). On the hosted demo backups are disabled — the database
+there is ephemeral by design.
+
 ### Help (`/help.html`)
 A condensed version of this guide, in-app.
 
@@ -146,3 +154,26 @@ online show the printable pass card on the confirmation page.
   attempts land in the audit log), voids/refunds require a manager to enter their own
   credentials, and the Password button in the top bar changes your password — which also
   signs out every other session for the account.
+
+## Backup and restore runbook
+
+- **Where snapshots live:** `data/backups/owlpark-<timestamp>-<scheduled|manual>.db`,
+  file mode 0600. Each snapshot is the complete database (including staff password hashes
+  and member emails) — copy the folder offsite regularly (`rsync data/backups/ …`) and
+  treat the copies as sensitive.
+- **Taking one:** the Backups page (**Back up now**) or wait for the scheduler. Tune with
+  `settings` keys `backups.interval_min` (0 disables the scheduler) and `backups.retain`,
+  or env `OWLPOS_BACKUP_INTERVAL_MIN` / `OWLPOS_BACKUP_RETAIN`.
+- **Restoring:** stop the server, then:
+
+  ```
+  node tools/restore.js data/backups/<snapshot>.db
+  ```
+
+  The tool verifies the snapshot's integrity, refuses snapshots created by newer code
+  than this checkout, keeps your current database beside the restored one as
+  `owlpark-pos-pre-restore-<timestamp>.db`, and records the restore in the audit log.
+  Older snapshots are fine — pending migrations apply on the next start. Use `--db <path>`
+  for a non-default database location; `--force` overrides the freshness/name checks.
+- **Health:** `/api/health` shows disk-free, database size, and last-backup time to
+  signed-in admins/managers; the shell shows a persistent banner when disk is low.

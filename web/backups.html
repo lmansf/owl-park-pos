@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backups — Owl Park POS</title>
+<link rel="stylesheet" href="/shell.css">
+<style>
+  .bk-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .bk-head h2 { margin: 0; }
+  .bk-status { display: flex; gap: 18px; flex-wrap: wrap; font-size: 14px; margin-bottom: 12px; }
+  .bk-status b { font-weight: 600; }
+  .table-wrap { overflow-x: auto; }
+  td .op-btn { padding: 4px 10px; font-size: 13px; font-weight: 500; }
+  td code { font-size: 12px; }
+  .bk-cards { display: none; }
+  .bk-restore code { display: inline-block; padding: 2px 6px; background: rgba(127,127,127,.15); border-radius: 4px; overflow-wrap: anywhere; }
+  @media (max-width: 480px) {
+    .table-wrap { display: none; }
+    .bk-cards { display: grid; gap: 10px; }
+    .bk-card { border: 1px solid rgba(127,127,127,.35); border-radius: 8px; padding: 10px 12px; }
+    .bk-card .row1 { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .bk-card code { font-size: 11px; overflow-wrap: anywhere; opacity: .7; }
+    .bk-card .op-btn { min-height: 44px; margin-top: 8px; width: 100%; }
+    #btn-run { width: 100%; min-height: 44px; }
+    .bk-head { flex-direction: column; align-items: stretch; }
+  }
+</style>
+</head>
+<body>
+<main class="op-main">
+  <div class="op-card">
+    <div class="bk-head">
+      <h2>Backups</h2>
+      <button class="op-btn" id="btn-run">Back up now</button>
+    </div>
+    <div class="bk-status" id="status-line"></div>
+    <p class="op-muted" id="retain-note" style="font-size:13px"></p>
+    <div class="table-wrap">
+      <table class="op-table" id="bk-table">
+        <thead><tr>
+          <th>Date</th><th>Trigger</th><th class="num">Size</th><th>File</th><th></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="bk-cards" id="bk-cards"></div>
+    <p class="op-muted" id="empty-note" style="font-size:13px; display:none">
+      No snapshots yet — take the first one with “Back up now”.
+    </p>
+  </div>
+
+  <div class="op-card bk-restore">
+    <h2>Restoring</h2>
+    <p style="font-size:14px">
+      Restore runs offline, never from this page. Stop the server, then on the server machine run:
+    </p>
+    <p><code id="restore-cmd">node tools/restore.js data/backups/&lt;snapshot&gt;.db</code></p>
+    <p class="op-muted" style="font-size:13px">
+      The tool verifies the snapshot, keeps the current database as a
+      <code>-pre-restore-</code> copy, and refuses snapshots newer than the installed code.
+      Older snapshots are fine — pending migrations apply on the next start. Copy
+      <code>data/backups/</code> somewhere off this machine regularly; snapshots contain
+      the full database.
+    </p>
+  </div>
+</main>
+
+<script src="/shell.js"></script>
+<script>
+'use strict';
+(async () => {
+  const me = await op.init({ page: '/backups.html' });
+  if (!me) return;
+
+  const $ = (sel) => document.querySelector(sel);
+  let ephemeral = false;
+
+  function fmtBytes(n) {
+    if (n >= 1024 * 1024 * 1024) return (n / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+    if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
+  }
+
+  function ago(iso) {
+    const min = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    if (min < 1) return 'just now';
+    if (min < 60) return `${min} min ago`;
+    if (min < 48 * 60) return `${Math.round(min / 60)} h ago`;
+    return `${Math.round(min / 1440)} days ago`;
+  }
+
+  async function reload() {
+    const [health, data] = await Promise.all([op.api('/api/health'), op.api('/api/backups')]);
+    ephemeral = !!health.ephemeral;
+    const parts = [];
+    if (data.backups.length) {
+      parts.push(`Last backup: <b>${ago(data.backups[0].mtime)}</b> · ${data.backups[0].trigger}`);
+    } else {
+      parts.push('Last backup: <b>never</b>');
+    }
+    if (health.disk_free_bytes !== undefined) {
+      parts.push(`Disk free: <b>${fmtBytes(health.disk_free_bytes)}</b>${health.disk_low ? ' <span class="op-badge err">low</span>' : ''}`);
+      parts.push(`Database: <b>${fmtBytes(health.db_bytes)}</b>`);
+    }
+    if (data.interval_min > 0) parts.push(`Scheduled: <b>every ${data.interval_min} min</b>`);
+    else parts.push('Scheduled: <b>off</b>');
+    $('#status-line').innerHTML = parts.map((p) => `<span>${p}</span>`).join('');
+    $('#retain-note').textContent =
+      `Keeping the ${data.retain} most recent snapshots — older ones are removed automatically after each backup.`;
+    if (ephemeral) {
+      $('#btn-run').disabled = true;
+      $('#btn-run').textContent = 'Backups disabled (hosted demo)';
+    }
+    render(data.backups);
+  }
+
+  function rowActions(b) {
+    return `<button class="op-btn danger" data-del="${op.esc(b.name)}">Delete</button>`;
+  }
+
+  function render(backups) {
+    $('#empty-note').style.display = backups.length ? 'none' : '';
+    $('#bk-table tbody').innerHTML = backups.map((b) => `
+      <tr>
+        <td style="white-space:nowrap">${op.fmtDate(b.mtime)} ${op.fmtTime(b.mtime)}</td>
+        <td><span class="op-badge ${b.trigger === 'manual' ? 'ok' : 'warn'}">${b.trigger}</span></td>
+        <td class="num">${fmtBytes(b.bytes)}</td>
+        <td><code>${op.esc(b.name)}</code></td>
+        <td class="op-right">${rowActions(b)}</td>
+      </tr>`).join('');
+    $('#bk-cards').innerHTML = backups.map((b) => `
+      <div class="bk-card">
+        <div class="row1">
+          <span>${op.fmtDate(b.mtime)} ${op.fmtTime(b.mtime)} <span class="op-badge ${b.trigger === 'manual' ? 'ok' : 'warn'}">${b.trigger}</span></span>
+          <span>${fmtBytes(b.bytes)}</span>
+        </div>
+        <code>${op.esc(b.name)}</code>
+        ${rowActions(b)}
+      </div>`).join('');
+    document.querySelectorAll('[data-del]').forEach((btn) => (btn.onclick = () => remove(btn.dataset.del, backups)));
+  }
+
+  async function remove(name, backups) {
+    const b = backups.find((x) => x.name === name);
+    const when = `${op.fmtDate(b.mtime)}, ${op.fmtTime(b.mtime)}`;
+    if (!confirm(`Delete snapshot from ${when}? This cannot be undone.`)) return;
+    try {
+      await op.api(`/api/backups/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      op.toast('Snapshot deleted', 'ok');
+      await reload();
+    } catch { /* toast shown */ }
+  }
+
+  $('#btn-run').onclick = async () => {
+    const btn = $('#btn-run');
+    btn.disabled = true;
+    btn.textContent = 'Backing up…';
+    try {
+      const r = await op.api('/api/backups/run', { method: 'POST', body: {} });
+      op.toast(`Backup complete — ${fmtBytes(r.backup.bytes)}`, 'ok');
+      await reload();
+    } catch { /* toast shown */ } finally {
+      if (!ephemeral) { btn.disabled = false; btn.textContent = 'Back up now'; }
+    }
+  };
+
+  await reload();
+})();
+</script>
+</body>
+</html>
