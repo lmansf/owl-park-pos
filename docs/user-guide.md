@@ -24,7 +24,10 @@ The guest **web store** at `/store/` needs no login.
 
 ### Dashboard (`/index.html`)
 Today at a glance: revenue, orders, tickets sold, admits (with denial count), active
-members, and the next sessions with a fill meter. Auto-refreshes every minute.
+members, and the next sessions with a fill meter. Managers and admins also see a **Sales
+by group today** card — order revenue (incl. tax) by item group, top groups plus
+Ungrouped. It is sales-based, unlike the payments-based revenue tile, so the two can
+differ on days with refunds. Auto-refreshes every minute.
 
 ### POS (`/pos.html`)
 The selling screen. Left side: your **designed menu pages** (from the Menu builder) as
@@ -60,7 +63,8 @@ deleted.
 
 ### Groups (`/item-groups.html`)
 Item groups (name, sort, color) with a two-pane picker to assign products. Groups feed the
-Menu builder ("generate from group"), the Store builder (group sections), and Item Config.
+Menu builder ("generate from group"), the Store builder (group sections), Item Config, and
+the group rollups in Reports and on the Dashboard.
 
 ### Events (`/events.html`)
 Events and their timed sessions. **Bulk generate** creates a session grid (date range,
@@ -106,7 +110,12 @@ record.
 Four date-ranged reports, each with a totals row and CSV download: **Sales summary** (by
 day and channel; net = gross − discounts), **Product mix**, **Admissions** (scans, admits,
 denials by reason, per gate), **Memberships** (sold/renewed, active, upcoming
-expirations).
+expirations). Sales summary and Admissions also offer a **Group by: item group** toggle:
+totals roll up per group, products in no group land under **Ungrouped**, and products in
+multiple groups count in each group — the report footer discloses that group totals can
+therefore exceed the grand total. Member and unknown-code scans carry no product, so the
+grouped Admissions report counts them in the footer instead of a group row. The CSV
+download follows whichever mode is on screen.
 
 ### Backups (`/backups.html`) — admin only
 Snapshot list with sizes and triggers, a **Back up now** button, disk-space and

@@ -8,7 +8,10 @@ server-local day, derived read-only from orders, payments, tickets, and admits.
 
 `web/index.html` (all back-office roles) SHALL show today at a glance: revenue, orders,
 tickets sold, admits, in-park estimate (admits today), member count, next sessions with
-fill %. Numbers come from `GET /api/reports/dashboard` computed live from the DB.
+fill %. Numbers come from `GET /api/reports/dashboard` computed live from the DB. For
+managers and admins only, the dashboard payload additionally includes today's revenue by
+item group (sales-based — order lines of orders paid today — top 5 groups plus
+Ungrouped); other roles never receive it.
 
 #### Scenario: Sale moves the needle
 - **WHEN** a POS sale finalizes and the dashboard refreshes

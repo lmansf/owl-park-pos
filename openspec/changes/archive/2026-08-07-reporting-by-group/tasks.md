@@ -11,4 +11,4 @@
 
 ## Phase C — integration (serial)
 
-- [ ] C1 Full suite + smoke green; archive
+- [x] C1 Full suite + smoke green; archive

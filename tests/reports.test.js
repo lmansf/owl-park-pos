@@ -534,3 +534,19 @@ test('reports: group rollups (sales, admissions, dashboard, CSV, security)', asy
     assert.deepEqual(ra.data.sections[0].rows, []);
   });
 });
+
+// The live app always auto-mounts groups.js, so exercise the graceful-degradation
+// guard by mounting reports directly with a ctx that lacks the groups module.
+test('reports: group mode degrades to 400 groups_unavailable without the groups module', () => {
+  const reports = require('../server/modules/reports');
+  const handlers = new Map();
+  const router = { get: (p, _roles, h) => handlers.set(p, h) };
+  reports.mount(router, { db: null, modules: {} });
+  for (const p of ['/api/reports/sales', '/api/reports/admissions']) {
+    assert.throws(
+      () => handlers.get(p)({ query: { group_by: 'group' }, user: { role: 'manager' } }, {}),
+      (e) => e.status === 400 && e.code === 'groups_unavailable',
+      `${p} should refuse group mode without the groups module`
+    );
+  }
+});
