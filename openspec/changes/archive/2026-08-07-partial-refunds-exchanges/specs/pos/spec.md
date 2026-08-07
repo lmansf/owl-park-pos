@@ -29,6 +29,17 @@ Refunded tickets scan as denied thereafter; remaining tickets stay valid.
 - **THEN** that ticket scans denied, the other two scan ok, and the negative payment row
   equals that line's total.
 
+#### Scenario: Cashier void with a manager standing by
+- **WHEN** a cashier voids an open order and a manager enters their own credentials in
+  the approver prompt
+- **THEN** the void succeeds and the audit row carries the cashier as actor and the
+  manager as `approved_by`.
+
+#### Scenario: Gate credentials cannot approve
+- **WHEN** a void or refund is submitted with an `approver` whose role is `gate` (or a
+  wrong password, or no approver at all)
+- **THEN** the response is 403 `approval_required` and the order is unchanged.
+
 ## ADDED Requirements
 
 ### Requirement: Session exchange
