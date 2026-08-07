@@ -1,7 +1,10 @@
 'use strict';
-// pos — order creation + pricing, THE shared posting path (finalizeOrder), void/refund.
-// finalizeOrder is the ONLY code path that marks orders paid, issues tickets and
-// mutates event_sessions.sold — the online store must call it too.
+// pos — order creation + pricing, THE shared posting path (finalizeOrder),
+// void/refund (full or per-line) and session exchanges.
+// finalizeOrder is the ONLY code path that marks orders paid — the online store
+// must call it too. Ticket rows are created only through issueTicket, and
+// event_sessions.sold moves only through events.reserveCapacity/releaseCapacity
+// (finalize, refund and exchange all inside one tx each).
 const { ApiError } = require('../core/http');
 const { tx, now } = require('../core/db');
 const { audit, randomCode, verifyManagerCredential, createRateLimiter } = require('../core/auth');
@@ -9,6 +12,7 @@ const { audit, randomCode, verifyManagerCredential, createRateLimiter } = requir
 const SELL = ['cashier', 'manager', 'admin'];
 const DAY_MS = (24 * 3600 * 1000);
 const REF_MAX = 64; // refs land in DB rows and receipts — cap attacker-length input
+const MAX_REFUND_LINES = 200; // sanity cap on a refund selection body
 
 // Tender registry — adding a tender = adding an entry here (plus, optionally, a
 // default clearing mapping in accounts.js). finalizeOrder consumes the registry;
@@ -42,6 +46,23 @@ function uniqueTicketCode(db) {
     if (!db.prepare('SELECT 1 FROM tickets WHERE code = ?').get(code)) return code;
   }
   throw new Error('could not allocate unique ticket code');
+}
+
+// THE ticket issuance chokepoint inside this module: finalizeOrder and the
+// exchange path both create ticket rows only through here.
+function issueTicket(db, t) {
+  const info = db
+    .prepare(
+      `INSERT INTO tickets (code, order_line_id, product_id, event_session_id, status,
+         uses_remaining, valid_from, valid_to, holder_name, exchanged_from)
+       VALUES (?, ?, ?, ?, 'valid', ?, ?, ?, ?, ?)`
+    )
+    .run(
+      uniqueTicketCode(db), t.order_line_id, t.product_id, t.event_session_id,
+      t.uses_remaining, t.valid_from, t.valid_to, t.holder_name || '',
+      t.exchanged_from ?? null
+    );
+  return db.prepare('SELECT * FROM tickets WHERE id = ?').get(Number(info.lastInsertRowid));
 }
 
 function uniqueConfirmation(db, prefix) {
@@ -87,7 +108,8 @@ function getOrderDetail(db, id) {
   if (!order) return null;
   order.lines = db
     .prepare(
-      `SELECT ol.*, p.kind AS product_kind, p.sku, s.starts_at AS session_starts_at
+      `SELECT ol.*, p.kind AS product_kind, p.sku, p.event_id,
+              s.starts_at AS session_starts_at
        FROM order_lines ol
        JOIN products p ON p.id = ol.product_id
        LEFT JOIN event_sessions s ON s.id = ol.event_session_id
@@ -99,10 +121,11 @@ function getOrderDetail(db, id) {
     .all(id);
   order.tickets = db
     .prepare(
-      `SELECT t.*, ol.description AS line_description,
+      `SELECT t.*, ol.description AS line_description, p.event_id,
               s.starts_at AS session_starts_at, s.ends_at AS session_ends_at
        FROM tickets t
        JOIN order_lines ol ON ol.id = t.order_line_id
+       JOIN products p ON p.id = t.product_id
        LEFT JOIN event_sessions s ON s.id = t.event_session_id
        WHERE ol.order_id = ? ORDER BY t.id`
     )
@@ -309,19 +332,15 @@ function finalizeOrder(db, ctx, orderId, payments) {
     }
 
     // --- tickets: one per qty on kind='ticket' lines -------------------------
-    const insTicket = db.prepare(
-      `INSERT INTO tickets (code, order_line_id, product_id, event_session_id, status,
-         uses_remaining, valid_from, valid_to, holder_name)
-       VALUES (?, ?, ?, ?, 'valid', ?, ?, ?, ?)`
-    );
     for (const l of lines) {
       if (l.kind !== 'ticket') continue;
       const validTo = new Date(Date.parse(at) + l.validity_days * DAY_MS).toISOString();
       for (let i = 0; i < l.qty; i++) {
-        insTicket.run(
-          uniqueTicketCode(db), l.id, l.product_id, l.event_session_id,
-          l.max_uses, at, validTo, order.customer_name || ''
-        );
+        issueTicket(db, {
+          order_line_id: l.id, product_id: l.product_id,
+          event_session_id: l.event_session_id, uses_remaining: l.max_uses,
+          valid_from: at, valid_to: validTo, holder_name: order.customer_name || '',
+        });
       }
     }
 
@@ -374,48 +393,276 @@ function finalizeOrder(db, ctx, orderId, payments) {
   });
 }
 
-// Full refund: paid -> refunded, tickets void, capacity released, negative payment
-// rows (net of change), refunded_at, audit. approverId attributes the manager who
-// approved the refund (may equal userId when a manager runs their own session).
-function refundOrder(db, ctx, orderId, userId, approverId) {
+// Refund a paid (or partially refunded) order, in full or per line/quantity.
+// selection = [{order_line_id, qty}] refunds exactly those quantities; an
+// absent/empty selection is a full refund of everything still live (legacy
+// behavior: voids remaining tickets even if already used — a manager decision).
+// Every refund: affected tickets void, their sessions' sold released, one
+// refunds header + refund_lines rows, negative payment rows allocated across
+// the original tender methods, order status derived from per-line progress
+// (partial_refund while some quantities remain live, refunded + refunded_at
+// when nothing does), audit. approverId attributes the manager who approved
+// (may equal userId when a manager runs their own session).
+function refundOrder(db, ctx, orderId, userId, approverId, selection) {
   return tx(db, () => {
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     if (!order) throw new ApiError(404, 'not_found', `No order ${orderId}`);
-    if (order.status !== 'paid') {
-      throw new ApiError(409, 'not_refundable', `Only paid orders can be refunded (order is ${order.status})`);
+    if (order.status !== 'paid' && order.status !== 'partial_refund') {
+      throw new ApiError(
+        409, 'not_refundable',
+        `Only paid or partially refunded orders can be refunded (order is ${order.status})`
+      );
     }
-    const lines = db.prepare('SELECT * FROM order_lines WHERE order_id = ?').all(orderId);
-    for (const l of lines) {
-      if (l.event_session_id != null) {
-        ctx.modules.events.releaseCapacity(db, l.event_session_id, l.qty);
-      }
-    }
-    const voided = db
+    const lines = db
       .prepare(
-        `UPDATE tickets SET status = 'void'
-         WHERE status != 'void'
-           AND order_line_id IN (SELECT id FROM order_lines WHERE order_id = ?)`
+        `SELECT ol.*, p.kind FROM order_lines ol
+         JOIN products p ON p.id = ol.product_id
+         WHERE ol.order_id = ? ORDER BY ol.id`
       )
-      .run(orderId).changes;
+      .all(orderId);
+    const byLineId = new Map(lines.map((l) => [l.id, l]));
+
+    // --- normalize + validate the selection (state re-read inside this tx) ---
+    const explicit = Array.isArray(selection) && selection.length > 0;
+    let picks; // [{line, q}]
+    if (!explicit) {
+      if (selection !== undefined && selection !== null && !Array.isArray(selection)) {
+        throw bad('bad_lines', 'lines must be an array of {order_line_id, qty}');
+      }
+      picks = lines
+        .filter((l) => l.refunded_qty < l.qty)
+        .map((l) => ({ line: l, q: l.qty - l.refunded_qty }));
+      if (!picks.length) {
+        throw new ApiError(409, 'not_refundable', 'Nothing left to refund on this order');
+      }
+    } else {
+      if (selection.length > MAX_REFUND_LINES) {
+        throw bad('bad_lines', `At most ${MAX_REFUND_LINES} line entries per refund`);
+      }
+      const seen = new Set();
+      picks = selection.map((raw) => {
+        // no coercion on the money path: "2" is rejected, only real integers pass
+        const lineId = raw?.order_line_id;
+        if (!Number.isInteger(lineId) || !byLineId.has(lineId)) {
+          throw bad('bad_line', `Order line ${raw?.order_line_id} is not part of this order`);
+        }
+        if (seen.has(lineId)) {
+          throw bad('bad_line', `Order line ${lineId} appears more than once`);
+        }
+        seen.add(lineId);
+        const line = byLineId.get(lineId);
+        const q = raw?.qty;
+        const remaining = line.qty - line.refunded_qty;
+        if (!Number.isInteger(q) || q < 1 || q > remaining) {
+          throw bad(
+            'bad_qty',
+            `Line ${lineId}: qty must be an integer between 1 and ${remaining} (unrefunded remainder)`
+          );
+        }
+        return { line, q };
+      });
+    }
 
     const at = now();
+
+    // --- per-line money: proportional over the unrefunded remainder, so the
+    // last refund of a line always takes the exact leftover cents -------------
+    const priorSums = db.prepare(
+      `SELECT COALESCE(SUM(discount_cents), 0) AS disc, COALESCE(SUM(tax_cents), 0) AS tax
+       FROM refund_lines WHERE order_line_id = ?`
+    );
+    let refundTotal = 0;
+    for (const p of picks) {
+      const { line, q } = p;
+      const remaining = line.qty - line.refunded_qty;
+      const prior = priorSums.get(line.id);
+      const remDisc = line.discount_cents - prior.disc;
+      const remTax = line.tax_cents - prior.tax;
+      p.gross = q * line.unit_price_cents;
+      p.discount = q === remaining ? remDisc : Math.round((remDisc * q) / remaining);
+      p.tax = q === remaining ? remTax : Math.round((remTax * q) / remaining);
+      p.total = p.gross - p.discount + p.tax;
+      refundTotal += p.total;
+    }
+
+    // --- tickets + capacity: void the affected tickets, release the sessions
+    // the voided tickets actually occupy (an exchanged ticket may sit in a
+    // different session than its order line) ---------------------------------
+    let voided = 0;
+    for (const p of picks) {
+      const { line, q } = p;
+      let voidedTickets = [];
+      if (line.kind === 'ticket') {
+        if (explicit) {
+          const valid = db
+            .prepare(
+              "SELECT * FROM tickets WHERE order_line_id = ? AND status = 'valid' ORDER BY id LIMIT ?"
+            )
+            .all(line.id, q);
+          if (valid.length < q) {
+            throw new ApiError(
+              409, 'tickets_used',
+              `Line ${line.id}: only ${valid.length} unused ticket(s) left — used or exchanged tickets cannot be refunded`
+            );
+          }
+          voidedTickets = valid;
+        } else {
+          // legacy full-refund sweep: void everything not already void
+          voidedTickets = db
+            .prepare("SELECT * FROM tickets WHERE order_line_id = ? AND status != 'void'")
+            .all(line.id);
+        }
+        for (const tk of voidedTickets) {
+          db.prepare("UPDATE tickets SET status = 'void' WHERE id = ?").run(tk.id);
+          voided++;
+          if (tk.event_session_id != null) {
+            ctx.modules.events.releaseCapacity(db, tk.event_session_id, 1);
+          }
+        }
+      } else if (line.event_session_id != null) {
+        // session-bound non-ticket line: capacity follows the line itself
+        ctx.modules.events.releaseCapacity(db, line.event_session_id, q);
+      }
+    }
+
+    // --- refund event + per-line progress ------------------------------------
+    const refundId = Number(
+      db.prepare(
+        'INSERT INTO refunds (order_id, user_id, total_cents, created_at) VALUES (?, ?, ?, ?)'
+      ).run(orderId, userId ?? null, refundTotal, at).lastInsertRowid
+    );
+    const insRl = db.prepare(
+      `INSERT INTO refund_lines (refund_id, order_line_id, qty, gross_cents,
+         discount_cents, tax_cents, total_cents)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    );
+    const bumpLine = db.prepare(
+      'UPDATE order_lines SET refunded_qty = refunded_qty + ? WHERE id = ?'
+    );
+    for (const p of picks) {
+      insRl.run(refundId, p.line.id, p.q, p.gross, p.discount, p.tax, p.total);
+      bumpLine.run(p.q, p.line.id);
+    }
+
+    // --- negative payments: allocate across the original methods, capped by
+    // what each method has left (net of change and of earlier refunds) --------
+    const methods = db
+      .prepare(
+        `SELECT method,
+                SUM(CASE WHEN amount_cents > 0 THEN amount_cents - change_cents ELSE 0 END)
+                + SUM(CASE WHEN amount_cents < 0 THEN amount_cents ELSE 0 END) AS remaining
+         FROM payments WHERE order_id = ? GROUP BY method ORDER BY method`
+      )
+      .all(orderId)
+      .filter((m) => m.remaining > 0);
+    let remTotal = methods.reduce((a, m) => a + m.remaining, 0);
+    if (refundTotal > remTotal) {
+      // structurally impossible (payments net always equals the live order
+      // total), but never print money if the books are inconsistent
+      throw new ApiError(409, 'refund_exceeds_payments', 'Refund exceeds remaining payments');
+    }
     const insPay = db.prepare(
       `INSERT INTO payments (order_id, method, amount_cents, change_cents, ref, created_at)
        VALUES (?, ?, ?, 0, 'REFUND', ?)`
     );
-    for (const p of db
-      .prepare('SELECT * FROM payments WHERE order_id = ? AND amount_cents > 0')
-      .all(orderId)) {
-      insPay.run(orderId, p.method, -(p.amount_cents - p.change_cents), at);
+    let remRefund = refundTotal;
+    for (const m of methods) {
+      const alloc = remTotal > 0 ? Math.round((remRefund * m.remaining) / remTotal) : 0;
+      remRefund -= alloc;
+      remTotal -= m.remaining;
+      if (alloc > 0) insPay.run(orderId, m.method, -alloc, at);
     }
-    db.prepare("UPDATE orders SET status = 'refunded', refunded_at = ? WHERE id = ?")
-      .run(at, orderId);
+
+    // --- derived order status ------------------------------------------------
+    const leftLive = db
+      .prepare('SELECT COUNT(*) AS n FROM order_lines WHERE order_id = ? AND refunded_qty < qty')
+      .get(orderId).n;
+    if (leftLive === 0) {
+      db.prepare("UPDATE orders SET status = 'refunded', refunded_at = ? WHERE id = ?")
+        .run(at, orderId);
+    } else {
+      db.prepare("UPDATE orders SET status = 'partial_refund' WHERE id = ?").run(orderId);
+    }
+
     audit(db, userId ?? null, 'pos.order.refund', {
       order_id: orderId, confirmation: order.confirmation,
-      total_cents: order.total_cents, voided_tickets: voided,
+      refund_cents: refundTotal, full: !explicit,
+      lines: picks.map((p) => ({ order_line_id: p.line.id, qty: p.q })),
+      voided_tickets: voided, approved_by: approverId ?? null,
+    });
+    return {
+      order: getOrderDetail(db, orderId),
+      voided_tickets: voided,
+      refund: { id: refundId, total_cents: refundTotal },
+    };
+  });
+}
+
+// Exchange a valid timed-entry ticket to another session of the same event.
+// One tx: reserve the target FIRST (a 'capacity' throw rolls everything back
+// leaving the original ticket untouched), then void the original, release its
+// session, and reissue through the shared issueTicket chokepoint with an
+// exchanged_from link. No money moves. The replacement keeps the original's
+// remaining uses; its validity window is widened just enough to cover the
+// target session so an exchange can never produce an instantly-expired ticket.
+function exchangeTicket(db, ctx, ticketId, targetSessionId, userId, approverId) {
+  return tx(db, () => {
+    const ticket = db
+      .prepare(
+        `SELECT t.*, p.event_id, p.name AS product_name
+         FROM tickets t JOIN products p ON p.id = t.product_id WHERE t.id = ?`
+      )
+      .get(ticketId);
+    if (!ticket) throw new ApiError(404, 'not_found', `No ticket ${ticketId}`);
+    if (ticket.status !== 'valid') {
+      throw new ApiError(
+        409, 'not_exchangeable', `Only valid tickets can be exchanged (ticket is ${ticket.status})`
+      );
+    }
+    if (ticket.event_session_id == null || ticket.event_id == null) {
+      throw bad('not_timed', 'Only timed-entry session tickets can be exchanged');
+    }
+    const targetId = targetSessionId;
+    if (!Number.isInteger(targetId) || targetId <= 0) {
+      throw bad('bad_session', 'event_session_id must be a positive integer');
+    }
+    if (targetId === ticket.event_session_id) {
+      throw bad('same_session', 'Ticket is already on that session');
+    }
+    const target = ctx.modules.events.getSession(db, targetId);
+    if (!target || target.cancelled || target.event_id !== ticket.event_id) {
+      throw bad('bad_session', `Session ${targetId} is not valid for ${ticket.product_name}`);
+    }
+
+    // reserve first: on a full session this throws 409 'capacity' and the
+    // original ticket stays exactly as it was
+    ctx.modules.events.reserveCapacity(db, targetId, 1);
+    const flipped = db
+      .prepare("UPDATE tickets SET status = 'void' WHERE id = ? AND status = 'valid'")
+      .run(ticket.id).changes;
+    if (flipped !== 1) {
+      throw new ApiError(409, 'not_exchangeable', 'Ticket changed state — retry');
+    }
+    ctx.modules.events.releaseCapacity(db, ticket.event_session_id, 1);
+
+    const validTo =
+      Date.parse(target.ends_at) > Date.parse(ticket.valid_to) ? target.ends_at : ticket.valid_to;
+    const fresh = issueTicket(db, {
+      order_line_id: ticket.order_line_id, product_id: ticket.product_id,
+      event_session_id: targetId, uses_remaining: ticket.uses_remaining,
+      valid_from: ticket.valid_from, valid_to: validTo,
+      holder_name: ticket.holder_name, exchanged_from: ticket.id,
+    });
+
+    audit(db, userId ?? null, 'pos.ticket.exchange', {
+      ticket_id: ticket.id, new_ticket_id: fresh.id,
+      from_session: ticket.event_session_id, to_session: targetId,
       approved_by: approverId ?? null,
     });
-    return { order: getOrderDetail(db, orderId), voided_tickets: voided };
+    return {
+      old_ticket: db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id),
+      ticket: fresh,
+    };
   });
 }
 
@@ -492,12 +739,25 @@ function mount(router, ctx) {
     });
   });
 
-  // Full refund of a paid order — any seller, with the same manager re-auth.
+  // Refund a paid/partially-refunded order — any seller, with the same manager
+  // re-auth. Body {lines: [{order_line_id, qty}]} refunds a selection; an
+  // absent/empty lines array refunds everything still live.
   router.post('/api/pos/orders/:id/refund', SELL, (req, res) => {
     approverRateLimit(req, res);
     const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
-    return refundOrder(db, ctx, Number(req.params.id), req.user.id, approver.id);
+    return refundOrder(db, ctx, Number(req.params.id), req.user.id, approver.id, req.body?.lines);
+  });
+
+  // Exchange a valid timed-entry ticket to another session of the same event —
+  // any seller, with the same manager re-auth as refunds (exchanges void and
+  // reissue tickets, so they carry the same trust level).
+  router.post('/api/pos/tickets/:id/exchange', SELL, (req, res) => {
+    approverRateLimit(req, res);
+    const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
+    return exchangeTicket(
+      db, ctx, Number(req.params.id), req.body?.event_session_id, req.user.id, approver.id
+    );
   });
 }
 
-module.exports = { mount, createOrder, finalizeOrder, refundOrder, listTenders };
+module.exports = { mount, createOrder, finalizeOrder, refundOrder, listTenders, exchangeTicket };

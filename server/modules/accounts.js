@@ -15,9 +15,11 @@
 //   Cr  tax liability      line tax_cents per tax-group mapping
 // clearing debit = subtotal - discount + tax, and discounts debit = discount, so
 // debits = subtotal + tax = income gross + tax = credits: balanced by construction.
-// A refund posts the exact reversal of the income/tax/discount legs on its
-// refunded_at day (Dr income, Dr tax, Cr discounts) — again balanced against the
-// negative payment rows. Activity with no mapping posts to suspense account
+// A refund event (refunds/refund_lines, full or per-line) posts the reversal of
+// exactly the refunded slice of the income/tax/discount legs on the day it
+// happened (Dr income, Dr tax, Cr discounts) — per refund event
+// total = gross - discount + tax, so it balances against that event's negative
+// payment rows. Activity with no mapping posts to suspense account
 // 9999 "Unmapped" so it stays visible and the books still balance.
 const { ApiError, sendCSV } = require('../core/http');
 const { tx } = require('../core/db');
@@ -213,7 +215,7 @@ function journalReport(db, rng) {
      FROM order_lines ol
      JOIN orders o ON o.id = ol.order_id
      JOIN products pr ON pr.id = ol.product_id
-     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded')
+     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded', 'partial_refund')
      GROUP BY day, ol.product_id`
   ).all(rng.fromIso, rng.toIso);
   for (const l of saleLines) {
@@ -225,7 +227,7 @@ function journalReport(db, rng) {
     `SELECT date(o.paid_at, 'localtime') AS day, d.id AS discount_id,
             SUM(o.discount_cents) AS disc
      FROM orders o LEFT JOIN discounts d ON d.code = o.discount_code
-     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded')
+     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded', 'partial_refund')
        AND o.discount_cents > 0
      GROUP BY day, d.id`
   ).all(rng.fromIso, rng.toIso);
@@ -233,15 +235,17 @@ function journalReport(db, rng) {
     post(r.day, acctFor('discount', r.discount_id), r.disc, 0);
   }
 
-  // 3) Refund reversals on the refunded_at day (clearing side is already handled
-  //    by the negative payment rows in step 1).
+  // 3) Refund reversals on the day each refund event happened, at refund_lines
+  //    granularity (clearing side is already handled by the negative payment
+  //    rows in step 1).
   const refundLines = db.prepare(
-    `SELECT date(o.refunded_at, 'localtime') AS day, ol.product_id, pr.tax_group_id,
-            SUM(ol.qty * ol.unit_price_cents) AS gross, SUM(ol.tax_cents) AS tax
-     FROM order_lines ol
-     JOIN orders o ON o.id = ol.order_id
+    `SELECT date(rf.created_at, 'localtime') AS day, ol.product_id, pr.tax_group_id,
+            SUM(rl.gross_cents) AS gross, SUM(rl.tax_cents) AS tax
+     FROM refund_lines rl
+     JOIN refunds rf ON rf.id = rl.refund_id
+     JOIN order_lines ol ON ol.id = rl.order_line_id
      JOIN products pr ON pr.id = ol.product_id
-     WHERE o.refunded_at >= ? AND o.refunded_at < ? AND o.status = 'refunded'
+     WHERE rf.created_at >= ? AND rf.created_at < ?
      GROUP BY day, ol.product_id`
   ).all(rng.fromIso, rng.toIso);
   for (const l of refundLines) {
@@ -250,11 +254,13 @@ function journalReport(db, rng) {
   }
 
   const refundDiscounts = db.prepare(
-    `SELECT date(o.refunded_at, 'localtime') AS day, d.id AS discount_id,
-            SUM(o.discount_cents) AS disc
-     FROM orders o LEFT JOIN discounts d ON d.code = o.discount_code
-     WHERE o.refunded_at >= ? AND o.refunded_at < ? AND o.status = 'refunded'
-       AND o.discount_cents > 0
+    `SELECT date(rf.created_at, 'localtime') AS day, d.id AS discount_id,
+            SUM(rl.discount_cents) AS disc
+     FROM refund_lines rl
+     JOIN refunds rf ON rf.id = rl.refund_id
+     JOIN orders o ON o.id = rf.order_id
+     LEFT JOIN discounts d ON d.code = o.discount_code
+     WHERE rf.created_at >= ? AND rf.created_at < ? AND rl.discount_cents > 0
      GROUP BY day, d.id`
   ).all(rng.fromIso, rng.toIso);
   for (const r of refundDiscounts) {

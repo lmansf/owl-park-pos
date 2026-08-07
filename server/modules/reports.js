@@ -16,8 +16,9 @@
 //
 // Sales semantics (reconciliation contract, see spec):
 //   gross = subtotal, net = gross - discounts (tax excluded, shown separately).
-//   An order counts on its paid_at day even if later refunded (history is immutable);
-//   the refund shows up as a NEGATIVE refund_cents on the refunded_at day.
+//   An order counts on its paid_at day even if later refunded — fully or per
+//   line (history is immutable); each refund event (refunds table) shows up as
+//   a NEGATIVE refund_cents on the day it happened.
 //   payments_cents sums payment rows net of change, so per day+channel:
 //   payments_cents = (net + tax of orders paid that day) + refund_cents of that day.
 const { ApiError, sendCSV } = require('../core/http');
@@ -131,7 +132,7 @@ function salesReport(db, rng) {
             COALESCE(SUM(o.discount_cents), 0) AS disc,
             COALESCE(SUM(o.tax_cents), 0) AS tax
      FROM orders o
-     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded')
+     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded', 'partial_refund')
      GROUP BY day, o.channel`
   ).all(rng.fromIso, rng.toIso)) {
     const row = rowFor(r.day, r.channel);
@@ -142,12 +143,12 @@ function salesReport(db, rng) {
     row.tax_cents += r.tax;
   }
 
-  // Refunds keyed by the day they happened, as negatives.
+  // Refund events (full or partial) keyed by the day they happened, as negatives.
   for (const r of db.prepare(
-    `SELECT date(o.refunded_at, 'localtime') AS day, o.channel,
-            COUNT(*) AS n, COALESCE(SUM(o.total_cents), 0) AS total
-     FROM orders o
-     WHERE o.refunded_at >= ? AND o.refunded_at < ? AND o.status = 'refunded'
+    `SELECT date(rf.created_at, 'localtime') AS day, o.channel,
+            COUNT(*) AS n, COALESCE(SUM(rf.total_cents), 0) AS total
+     FROM refunds rf JOIN orders o ON o.id = rf.order_id
+     WHERE rf.created_at >= ? AND rf.created_at < ?
      GROUP BY day, o.channel`
   ).all(rng.fromIso, rng.toIso)) {
     const row = rowFor(r.day, r.channel);
@@ -298,7 +299,7 @@ function productMixReport(db, rng) {
      FROM order_lines ol
      JOIN orders o ON o.id = ol.order_id
      JOIN products p ON p.id = ol.product_id
-     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded')
+     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded', 'partial_refund')
      GROUP BY ol.product_id
      ORDER BY gross_cents DESC, p.name`
   ).all(rng.fromIso, rng.toIso);
@@ -364,7 +365,7 @@ function membershipsReport(db, rng) {
               JOIN orders o ON o.id = ol.order_id
               JOIN products p ON p.id = ol.product_id
               WHERE p.membership_program_id = pr.id
-                AND o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded')), 0) AS units_sold,
+                AND o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded', 'partial_refund')), 0) AS units_sold,
             (SELECT COUNT(*) FROM members m
               WHERE m.program_id = pr.id AND m.joined_at >= ? AND m.joined_at < ?) AS new_members,
             (SELECT COUNT(*) FROM members m
@@ -398,7 +399,7 @@ function dashboard(db, groups) {
     dayStart
   );
   const orders_today = one(
-    "SELECT COUNT(*) AS n FROM orders WHERE paid_at >= ? AND status IN ('paid', 'refunded')",
+    "SELECT COUNT(*) AS n FROM orders WHERE paid_at >= ? AND status IN ('paid', 'refunded', 'partial_refund')",
     dayStart
   );
   const tickets_sold_today = one(
