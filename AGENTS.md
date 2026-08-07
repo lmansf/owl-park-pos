@@ -11,9 +11,9 @@ Park. Demo-grade auth and simulated payments; never expose beyond localhost.
 - Hard constraint: ZERO npm dependencies and zero network at runtime. Node 22 built-ins only
   (`node:http`, `node:sqlite`, `node:crypto`). Frontend is vanilla JS; no CDN/fonts/assets.
 - Architecture + frozen cross-module contracts (module export signatures, API shapes, code
-  formats, who owns which files): `openspec/changes/pos-mvp/design.md`. Spec deltas per
-  system live beside it in `specs/`. All DDL lives in `server/migrations/` (core-owned);
-  modules write no DDL.
+  formats, who owns which files): `openspec/changes/archive/2026-08-07-pos-mvp/design.md`.
+  Current per-system specs live in `openspec/specs/`. All DDL lives in
+  `server/migrations/` (core-owned); modules write no DDL.
 - Two invariant chokepoints: `pos.finalizeOrder` (the only path that marks orders paid,
   issues tickets, moves session capacity — POS and web store both use it) and
   `admissions.checkCode` (the only admit/deny path; always writes an `admits` row).

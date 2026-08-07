@@ -32,4 +32,5 @@ exercises the API/UI against the spec deltas, and files/fixes discrepancies).
       (ok/double/wrong-time) → web order → decline path → member sell + renew + scan →
       refund → reports reconcile
 - [x] C2 Fix integration findings; `node --test tests/` green
-- [ ] C3 README quickstart, AGENTS.md, screenshots optional; commit milestones
+- [x] C3 README quickstart, AGENTS.md, screenshots optional; commit milestones
+      (README + full user guide + in-app Help shipped in 960affb)

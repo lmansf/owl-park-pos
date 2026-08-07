@@ -2,7 +2,7 @@
 // pricing — price programs: date-ranged, prioritized per-product price overrides.
 //
 // resolvePrice(db, productId, atIso) is the frozen cross-team contract (see
-// openspec/changes/back-office-builders/design.md): pick the ACTIVE program whose
+// openspec/changes/archive/2026-08-07-back-office-builders/design.md): pick the ACTIVE program whose
 // starts_on..ends_on (SERVER-LOCAL calendar days, inclusive on both ends) covers the
 // local day of atIso AND has an entry for the product. Highest priority wins; ties
 // break to the lowest program id. Returns {price_cents, program_id, program_name}

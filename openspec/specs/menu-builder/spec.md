@@ -1,7 +1,9 @@
-# menu-builder (delta)
+# menu-builder Specification
 
-## ADDED Requirements
-
+## Purpose
+POS menu design: pages and positioned buttons that lay out the sell screen's grid, with a
+fallback auto-grid when no menu is defined.
+## Requirements
 ### Requirement: Menu designer
 
 `web/menu-builder.html` (admin/manager) SHALL manage menu pages (name, sort, active) and a
@@ -34,9 +36,11 @@ auto-generated grid — the sell flow must never be blocked by menu configuratio
 
 ### Requirement: Referential safety
 
-Deleting a page with buttons requires confirmation and removes its buttons; a page-link
-button whose target page is deleted or inactive is omitted from /api/menus/active.
+Deleting a page with buttons SHALL require confirmation and remove its buttons; a
+page-link button whose target page is deleted or inactive SHALL be omitted from
+/api/menus/active.
 
 #### Scenario: No dead links at the terminal
 - **WHEN** a linked page is deactivated
 - **THEN** the link button no longer appears in the active menu payload.
+
