@@ -26,7 +26,6 @@ const { audit } = require('../core/auth');
 const MANAGERS = ['manager', 'admin'];
 const KINDS = ['asset', 'liability', 'income', 'expense', 'clearing'];
 const SCOPES = ['product', 'tax_group', 'tender', 'discount'];
-const TENDERS = ['cash', 'card_sim'];
 const SUSPENSE_CODE = '9999';
 const DAY_MS = 24 * 3600 * 1000;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -34,6 +33,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DEFAULT_CHART = [
   ['1000', 'Cash Clearing', 'clearing'],
   ['1010', 'Card Clearing', 'clearing'],
+  ['1020', 'Voucher Clearing', 'clearing'],
   ['2200', 'Sales Tax Payable', 'liability'],
   ['4000', 'Admission Income', 'income'],
   ['4100', 'Membership Income', 'income'],
@@ -41,7 +41,10 @@ const DEFAULT_CHART = [
   ['4900', 'Discounts Given', 'expense'],
   [SUSPENSE_CODE, 'Unmapped', 'clearing'],
 ];
-const TENDER_DEFAULTS = { cash: '1000', card_sim: '1010' };
+// Tender method (pos registry key) → default clearing account. The valid method
+// set itself comes from ctx.modules.pos.listTenders() at mount, not from here —
+// a registry tender without a row here simply starts unmapped (suspense 9999).
+const TENDER_DEFAULTS = { cash: '1000', card_sim: '1010', voucher: '1020' };
 const KIND_INCOME = { ticket: '4000', membership: '4100', addon: '4200' };
 
 function bad(message) {
@@ -77,9 +80,25 @@ function ensureChart(db) {
       for (const d of db.prepare('SELECT id FROM discounts').all()) {
         map.run('discount', String(d.id), idByCode['4900']);
       }
-    } else if (!db.prepare('SELECT 1 FROM accounts WHERE code = ?').get(SUSPENSE_CODE)) {
-      db.prepare('INSERT INTO accounts (code, name, kind) VALUES (?, ?, ?)')
-        .run(SUSPENSE_CODE, 'Unmapped', 'clearing');
+    } else {
+      if (!db.prepare('SELECT 1 FROM accounts WHERE code = ?').get(SUSPENSE_CODE)) {
+        db.prepare('INSERT INTO accounts (code, name, kind) VALUES (?, ?, ?)')
+          .run(SUSPENSE_CODE, 'Unmapped', 'clearing');
+      }
+      // Databases seeded before a tender existed get its default clearing
+      // account + mapping too. Only when the account CODE is absent: an admin
+      // who deliberately cleared a mapping (account still present) is respected.
+      for (const [method, code] of Object.entries(TENDER_DEFAULTS)) {
+        if (db.prepare('SELECT 1 FROM accounts WHERE code = ?').get(code)) continue;
+        const [, name, kind] = DEFAULT_CHART.find(([c]) => c === code);
+        const info = db
+          .prepare('INSERT INTO accounts (code, name, kind) VALUES (?, ?, ?)')
+          .run(code, name, kind);
+        db.prepare(
+          `INSERT INTO account_map (scope, ref_key, account_id) VALUES ('tender', ?, ?)
+           ON CONFLICT(scope, ref_key) DO NOTHING`
+        ).run(method, Number(info.lastInsertRowid));
+      }
     }
   });
 }
@@ -302,11 +321,13 @@ function accountPayload(db, body, existing) {
   return { code, name, kind: src.kind, active };
 }
 
-function validateRefKey(db, scope, refKey) {
+function validateRefKey(db, scope, refKey, tenderMethods) {
   const key = String(refKey ?? '').trim();
   if (!key) throw bad('ref_key is required');
   if (scope === 'tender') {
-    if (!TENDERS.includes(key)) throw bad(`tender must be one of ${TENDERS.join(', ')}`);
+    if (!tenderMethods.includes(key)) {
+      throw bad(`tender must be one of ${tenderMethods.join(', ')}`);
+    }
     return key;
   }
   const table = { product: 'products', tax_group: 'tax_groups', discount: 'discounts' }[scope];
@@ -322,6 +343,9 @@ function validateRefKey(db, scope, refKey) {
 function mount(router, ctx) {
   const db = ctx.db;
   ensureChart(db);
+  // ctx.modules is fully populated (require loop) before any mount runs, so the
+  // pos tender registry is readable here even though accounts mounts first.
+  const tenderMethods = ctx.modules.pos.listTenders().map((t) => t.method);
 
   router.get('/api/accounts', MANAGERS, () => ({
     accounts: db.prepare('SELECT * FROM accounts ORDER BY code').all(),
@@ -344,7 +368,7 @@ function mount(router, ctx) {
     targets: {
       products: db.prepare('SELECT id, sku, name, kind, active FROM products ORDER BY kind, name').all(),
       tax_groups: db.prepare('SELECT id, name, rate_bp FROM tax_groups ORDER BY id').all(),
-      tenders: TENDERS,
+      tenders: tenderMethods,
       discounts: db.prepare('SELECT id, code, name, active FROM discounts ORDER BY code').all(),
     },
   }));
@@ -353,7 +377,7 @@ function mount(router, ctx) {
   router.put('/api/accounts/map', ['admin'], (req) => {
     const scope = req.body?.scope;
     if (!SCOPES.includes(scope)) throw bad(`scope must be one of ${SCOPES.join(', ')}`);
-    const refKey = validateRefKey(db, scope, req.body?.ref_key);
+    const refKey = validateRefKey(db, scope, req.body?.ref_key, tenderMethods);
     const rawId = req.body?.account_id;
     if (rawId === null || rawId === undefined || rawId === '') {
       db.prepare('DELETE FROM account_map WHERE scope = ? AND ref_key = ?').run(scope, refKey);

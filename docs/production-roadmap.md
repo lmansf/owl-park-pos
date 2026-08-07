@@ -32,9 +32,10 @@ Simulated card tender today. An SMB needs:
 
 - Semi-integrated card terminals (Stripe Terminal, Adyen, SumUp, or a local acquirer):
   the POS never touches card data, keeping PCI scope at SAQ-level minimal. This slots
-  into the tender registry (proposed: `pluggable-tenders`) as an `authorize` hook that
-  talks to the terminal — which means relaxing the zero-network constraint for exactly
-  this integration, behind a config flag.
+  into the tender registry (shipped: `pluggable-tenders` — registry, `authorize` seam,
+  demo voucher tender) as an `authorize` hook that talks to the terminal — which means
+  relaxing the zero-network constraint for exactly this integration, behind a config
+  flag.
 - Tender reconciliation: settlement/batch reports matched against the daily journal
   (`chart-of-accounts` already balances per day — extend with processor settlement
   import).
@@ -106,7 +107,8 @@ Explicitly out of scope in the demo; an SMB needs:
 ## Suggested sequencing for an SMB pilot
 
 1. Security hardening (§1) + backups/ops (§3) — prerequisite for anything real.
-2. `pluggable-tenders` → semi-integrated card terminal (§2).
+2. Semi-integrated card terminal (§2), filling the shipped `pluggable-tenders`
+   registry's `authorize` seam.
 3. Hardware: printer + scanner + drawer (§4).
 4. Drawer sessions/Z-reports + `per-terminal-menus` (§5).
 5. Tax/receipt compliance for the venue's jurisdiction (§6).

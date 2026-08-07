@@ -158,6 +158,19 @@ async function main() {
   const scanVoid = await gate('POST', '/api/admissions/scan', { code: adultTickets[1].code, gate: 'main' });
   ok(scanVoid.data.result === 'denied' && scanVoid.data.reason === 'void', 'refunded ticket scans denied: void');
 
+  console.log('— pluggable tenders —');
+  const tenderList = (await cashier('GET', '/api/pos/tenders')).data.tenders;
+  ok(tenderList.some((t) => t.method === 'voucher'), 'tender registry serves voucher to sellers');
+  const vOrder = (await cashier('POST', '/api/pos/orders', {
+    lines: [{ product_id: adult.id, qty: 1 }],
+  })).data.order;
+  const vFin = await cashier('POST', `/api/pos/orders/${vOrder.id}/finalize`, {
+    payments: [{ method: 'voucher', amount_cents: vOrder.total_cents }],
+  });
+  ok(vFin.status === 200 && vFin.data.order.payments[0].method === 'voucher'
+    && vFin.data.order.payments[0].ref === 'VOUCHER',
+    'voucher payment finalizes through the shared posting path');
+
   console.log('— reports reconcile —');
   const today = new Date();
   const d = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
@@ -189,9 +202,9 @@ async function main() {
   ok(grouped.status === 200, 'grouped sales report loads');
   const gsec = grouped.data.sections[0];
   const dayTix = gsec.rows.find((r) => r.group === 'Day Tickets');
-  // 3 ADULT sold today: 2 in the (since refunded) POS order + 1 web — refunded
-  // orders still count on their paid day.
-  ok(dayTix && dayTix.units === 3 && dayTix.gross_cents === 3 * adult.price_cents,
+  // 4 ADULT sold today: 2 in the (since refunded) POS order + 1 web + 1 voucher —
+  // refunded orders still count on their paid day.
+  ok(dayTix && dayTix.units === 4 && dayTix.gross_cents === 4 * adult.price_cents,
     "'Day Tickets' group gross equals the day's ADULT gross");
   const ungrouped = gsec.rows.find((r) => r.group === 'Ungrouped');
   ok(ungrouped && ungrouped.units > 0, 'Ungrouped row absorbs products in no group (PLNTM, MEM-EXP)');

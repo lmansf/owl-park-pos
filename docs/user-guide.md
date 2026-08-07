@@ -34,8 +34,9 @@ The selling screen. Left side: your **designed menu pages** (from the Menu build
 tabs of buttons — or, if no menu is configured, an automatic grid of all sellable items
 grouped by kind. Tap items to add to the cart; event-linked items (Planetarium) open a
 session picker showing remaining seats. Right side: the cart — quantities, discount code
-box, running totals (on phone-width screens the menu stacks above the cart). **Tender** opens the payment modal: cash (quick-bill buttons, change
-calculated) and/or simulated card; split tenders are fine. Finalizing shows the receipt
+box, running totals (on phone-width screens the menu stacks above the cart). **Tender** opens the payment modal with one row per configured
+tender — cash (quick-bill buttons, change calculated), simulated card, and a demo
+voucher (always approves); split tenders are fine. Finalizing shows the receipt
 and one printable stub per ticket, barcode included (browser print gives one ticket per
 page). Selling a **membership** prompts for the member's name/email, or search-and-attach
 an existing member to renew. **Order search** (top of page) finds past orders by
