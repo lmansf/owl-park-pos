@@ -194,6 +194,111 @@ test('security: approver probes are rate-limited per IP', async (t) => {
   assert.equal(locked, 0, 'unknown approver names must not lock real accounts');
 });
 
+test('security: dashboard financials are off-limits to the gate role', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+
+  const gate = client(base);
+  await gate('POST', '/api/auth/login', { username: 'gate', password: 'gate' });
+  const denied = await gate('GET', '/api/reports/dashboard');
+  assert.equal(denied.status, 403, 'gate is admissions-only — no revenue/KPI feed');
+
+  // sellers keep their dashboard
+  const cashier = client(base);
+  await cashier('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+  const ok = await cashier('GET', '/api/reports/dashboard');
+  assert.equal(ok.status, 200);
+  assert.equal(typeof ok.data.revenue_cents, 'number');
+});
+
+test('security: manager-authored html sections cannot script the store page', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const manager = client(base);
+  await manager('POST', '/api/auth/login', { username: 'manager', password: 'manager' });
+
+  const evil = [
+    '<img src=x onerror="fetch(\'/api/auth/revoke-sessions\',{method:\'POST\'})">',
+    '<script>document.location=\'//evil\'</script>',
+    '<a href="javascript:alert(1)">win a prize</a>',
+    '<a href="java&#115;cript:alert(1)">entities</a>',
+    '<svg onload=alert(1)></svg>',
+    '<iframe src="/"></iframe>',
+    '<p>Gates open at <strong>9am</strong>.</p>',
+  ].join('\n');
+  const r = await manager('POST', '/api/storefront/sections', {
+    title: 'Injected', kind: 'html', config: { html: evil },
+  });
+  assert.equal(r.status, 200);
+
+  // a row written before the sanitiser existed must be cleaned on the way out too
+  db.prepare(`INSERT INTO store_sections (title, kind, sort, active, config)
+              VALUES ('Legacy', 'html', 9, 1, ?)`)
+    .run(JSON.stringify({ html: '<img src=x onerror=alert(1)><b>legit</b>' }));
+
+  const layout = await fetch(base + '/api/store/layout').then((x) => x.json());
+  for (const s of layout.sections.filter((x) => x.kind === 'html')) {
+    assert.doesNotMatch(s.html, /onerror|onload|<script|<iframe|javascript:/i,
+      `scriptable markup leaked to guests: ${s.html}`);
+  }
+  const injected = layout.sections.find((s) => s.title === 'Injected');
+  assert.match(injected.html, /<strong>9am<\/strong>/, 'benign markup survives');
+  const legacy = layout.sections.find((s) => s.title === 'Legacy');
+  assert.match(legacy.html, /<b>legit<\/b>/);
+
+  // the stored config is sanitised too, not just the guest feed
+  const stored = (await manager('GET', '/api/storefront/sections')).data.sections
+    .find((s) => s.title === 'Injected');
+  assert.doesNotMatch(stored.config.html, /onerror|<script|javascript:/i);
+});
+
+test('security: integer fields reject null/[]/true instead of coercing', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+  const manager = client(base);
+  await manager('POST', '/api/auth/login', { username: 'manager', password: 'manager' });
+
+  const sell = (await manager('GET', '/api/catalog/sellable?channel=pos')).data.products;
+  const adult = sell.find((p) => p.sku === 'ADULT');
+  assert.ok(adult.price_cents > 0);
+
+  // Number(null)=0 — a cleared numeric field must 400, never zero the price
+  for (const v of [null, true, [100], {}, '']) {
+    const r = await manager('PUT', `/api/catalog/products/${adult.id}`, { price_cents: v });
+    assert.equal(r.status, 400, `price_cents ${JSON.stringify(v)} must be rejected`);
+  }
+  const after = (await manager('GET', '/api/catalog/sellable?channel=pos')).data.products
+    .find((p) => p.sku === 'ADULT');
+  assert.equal(after.price_cents, adult.price_cents, 'price unchanged by rejected updates');
+
+  // same helper in storefront: a null group_id must not become group 0
+  const s = await manager('POST', '/api/storefront/sections', {
+    title: 'X', kind: 'groups', config: { group_id: null },
+  });
+  assert.equal(s.status, 400);
+});
+
+test('security: recent-scans feed masks scanned credentials', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const gate = client(base);
+  await gate('POST', '/api/auth/login', { username: 'gate', password: 'gate' });
+
+  // an active seeded member pass is a long-lived credential — scan it once
+  const member = db.prepare("SELECT pass_code FROM members WHERE status = 'active'").get();
+  const scan = await gate('POST', '/api/admissions/scan', { code: member.pass_code, gate: 'north' });
+  assert.equal(scan.data.result, 'ok');
+
+  const { recent } = (await gate('GET', '/api/admissions/recent')).data;
+  assert.ok(recent.length >= 1);
+  for (const a of recent) {
+    assert.notEqual(a.code, member.pass_code, 'full member pass code leaked venue-wide');
+    assert.ok(a.code.length < member.pass_code.length, 'code is masked');
+  }
+  // operators still get enough to eyeball: prefix + last 4
+  assert.equal(recent[0].code, `${member.pass_code.slice(0, 2)}…${member.pass_code.slice(-4)}`);
+});
+
 test('security: static file traversal stays forbidden (regression guard)', async (t) => {
   const { server, base } = await startServer();
   t.after(() => server.close());

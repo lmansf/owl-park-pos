@@ -537,7 +537,9 @@ function mount(router, ctx) {
     return true;
   };
 
-  router.get('/api/reports/dashboard', [], (req) =>
+  // Sellers and up only: today's revenue/KPIs are outside the gate role's scope
+  // (gate sees Admissions only — an entrance device must never surface financials).
+  router.get('/api/reports/dashboard', ['cashier', 'manager', 'admin'], (req) =>
     dashboard(db, hasGroups && MANAGERS.includes(req.user.role) ? groupsMod : null));
 
   router.get('/api/reports/sales', MANAGERS, (req, res) => {

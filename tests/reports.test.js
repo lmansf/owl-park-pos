@@ -63,7 +63,9 @@ test('reports: dashboard, four reports, CSV parity, reconciliation', async (t) =
     const anon = await fetch(app.base + '/api/reports/dashboard');
     assert.equal(anon.status, 401);
     assert.equal((await cashier.call('GET', '/api/reports/sales')).status, 403);
-    assert.equal((await gate.call('GET', '/api/reports/dashboard')).status, 200);
+    assert.equal((await gate.call('GET', '/api/reports/dashboard')).status, 403,
+      'gate is admissions-only — no dashboard financials');
+    assert.equal((await cashier.call('GET', '/api/reports/dashboard')).status, 200);
     assert.equal((await manager.call('GET', '/api/reports/sales')).status, 200);
   });
 
@@ -475,7 +477,7 @@ test('reports: group rollups (sales, admissions, dashboard, CSV, security)', asy
       assert.equal((await cashier.raw(p + '&format=csv')).status, 403, `cashier 403 CSV ${p}`);
       assert.equal((await manager.call('GET', p)).status, 200, `manager 200 ${p}`);
     }
-    assert.equal((await gate.call('GET', '/api/reports/dashboard')).status, 200);
+    assert.equal((await gate.call('GET', '/api/reports/dashboard')).status, 403);
   });
 
   await t.test('security: group_by fuzz → 400 bad_param, no side effects, no stack', async () => {
