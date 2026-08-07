@@ -59,10 +59,35 @@ class Router {
   put(p, roles, h) { this.add('PUT', p, roles, h); }
   del(p, roles, h) { this.add('DELETE', p, roles, h); }
 
+  // Callers discard dispatch's promise (main.js, api/index.js), so a rejection
+  // here becomes an unhandled rejection and Node kills the process. dispatch
+  // must therefore never reject: it delegates to route() and turns any escape
+  // into a logged 500.
   async dispatch(req, res) {
-    const url = new URL(req.url, 'http://localhost');
-    const pathname = decodeURIComponent(url.pathname);
-    req.query = Object.fromEntries(url.searchParams);
+    try {
+      await this.route(req, res);
+    } catch (err) {
+      logError('http.dispatch', err, { method: req.method, url: req.url });
+      try {
+        if (!res.headersSent) {
+          sendJSON(res, 500, { error: 'internal', message: 'Internal error' });
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      } catch { /* socket already gone */ }
+    }
+  }
+
+  async route(req, res) {
+    let pathname;
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      pathname = decodeURIComponent(url.pathname); // throws URIError on e.g. /%zz
+      req.query = Object.fromEntries(url.searchParams);
+    } catch {
+      sendJSON(res, 400, { error: 'bad_request', message: 'Malformed URL encoding' });
+      return;
+    }
     req.cookies = parseCookies(req.headers.cookie || '');
 
     if (pathname.startsWith('/api/')) {
@@ -107,7 +132,10 @@ class Router {
     let rel = pathname === '/' ? '/index.html' : pathname;
     if (rel.endsWith('/')) rel += 'index.html';
     const file = path.normalize(path.join(this.webRoot, rel));
-    if (!file.startsWith(this.webRoot)) {
+    // Containment needs the trailing separator: a bare prefix test lets
+    // /%2e%2e%2fweb.bak escape to any SIBLING of webRoot whose name merely
+    // starts with the webRoot string. NUL bytes would make fs.readFile throw.
+    if (rel.includes('\0') || !file.startsWith(this.webRoot + path.sep)) {
       res.writeHead(403).end('forbidden');
       return;
     }
@@ -134,7 +162,14 @@ function parseCookies(header) {
   const out = {};
   for (const part of header.split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i > 0) {
+      try {
+        out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+      } catch {
+        // one malformed %-escape in a stale cookie must not fail the request
+        // (or, pre-fix, the process): treat that cookie as absent → fail closed
+      }
+    }
   }
   return out;
 }
@@ -167,9 +202,16 @@ function sendJSON(res, status, obj) {
 }
 
 function sendCSV(res, filename, rows) {
+  // Cells a spreadsheet would evaluate (leading = + - @ tab CR) are neutralised
+  // with a leading apostrophe per OWASP CSV-injection guidance — free-text like
+  // drawer reasons and gate names is attacker-writable and lands in exports a
+  // manager opens in Excel. Plain numbers (e.g. -12.50) stay untouched.
   const esc = (v) => {
-    const s = String(v ?? '');
-    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    let s = String(v ?? '');
+    if (/^[=+\-@\t\r]/.test(s) && typeof v !== 'number' && !/^-?\d+(\.\d+)?$/.test(s)) {
+      s = "'" + s;
+    }
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   };
   const body = rows.map((r) => r.map(esc).join(',')).join('\n') + '\n';
   res.writeHead(200, {
