@@ -50,7 +50,8 @@ function guestOrderView(db, order) {
   const lines = db
     .prepare(
       `SELECT ol.id, ol.description, ol.qty, ol.unit_price_cents, ol.discount_cents,
-              ol.tax_cents, ol.line_total_cents, ol.event_session_id,
+              ol.tax_cents, ol.line_total_cents, ol.event_session_id, ol.member_id,
+              ol.member_intent,
               p.kind AS product_kind, p.name AS product_name, p.membership_program_id,
               s.starts_at AS session_starts_at, s.ends_at AS session_ends_at,
               e.name AS event_name
@@ -77,28 +78,46 @@ function guestOrderView(db, order) {
     )
     .all(order.id);
 
-  // Membership lines: resolve the member the shared posting path created/renewed.
-  // pos encodes explicit member info in the line description ("(renewal #12)" /
-  // "(for Name <email>)"); otherwise the order email was used.
+  // Membership lines: resolve the member the shared posting path created/renewed —
+  // finalize stamps order_lines.member_id, so it is a plain join. Rows from before
+  // the member-order-lines migration may have no member_id; the backfilled
+  // member_intent email (the gift recipient on "(for ...)" lines) or, failing that,
+  // the order email identifies the member, so look it up by that.
   const members = [];
   const seen = new Set();
   for (const l of lines) {
     if (l.product_kind !== 'membership') continue;
     let member = null;
-    const renewal = l.description.match(/\(renewal #(\d+)\)\s*$/);
-    const explicit = l.description.match(/\(for ([^<>()]*?)(?:\s*<([^<>()]*)>)?\)\s*$/);
-    if (renewal) {
-      member = db.prepare('SELECT * FROM members WHERE id = ?').get(Number(renewal[1]));
+    if (l.member_id) {
+      member = db.prepare('SELECT * FROM members WHERE id = ?').get(l.member_id);
     } else {
-      const email = (explicit && explicit[2]) || order.customer_email;
+      let email = '';
+      if (l.member_intent) {
+        try {
+          email = String(JSON.parse(l.member_intent).email || '').trim();
+        } catch {
+          email = '';
+        }
+      }
+      if (!email && order.customer_email) email = String(order.customer_email).trim();
       if (email) {
         member = db
           .prepare(
             `SELECT * FROM members WHERE lower(email) = lower(?) AND program_id = ?
              ORDER BY id LIMIT 1`
           )
-          .get(String(email).trim(), l.membership_program_id);
+          .get(email, l.membership_program_id);
       }
+    }
+    // Reveal gate: a pass (incl. its gate credential) is only shown when the member's
+    // email matches the order email, or the member was minted by this very order —
+    // an arbitrary member id on a line must never leak someone else's pass code.
+    if (
+      member &&
+      String(member.email).toLowerCase() !== String(order.customer_email).toLowerCase() &&
+      Date.parse(member.joined_at) < Date.parse(order.created_at)
+    ) {
+      member = null;
     }
     if (member && !seen.has(member.id)) {
       seen.add(member.id);
@@ -110,6 +129,11 @@ function guestOrderView(db, order) {
         status: member.status,
       });
     }
+  }
+  // internal member ids stay out of the guest view (pass cards carry member_no)
+  for (const l of lines) {
+    delete l.member_id;
+    delete l.member_intent;
   }
 
   return {

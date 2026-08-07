@@ -222,6 +222,109 @@ test('store: guest storefront APIs', async (t) => {
     assert.equal(noEmail.status, 404);
   });
 
+  await t.test('security: web checkout cannot renew (or reveal) an arbitrary member id', async () => {
+    const victim = db.prepare("SELECT * FROM members WHERE email = 'dana@example.com'").get();
+    assert.ok(victim); // seeded demo member
+    const ordersBefore = db.prepare('SELECT COUNT(*) AS n FROM orders').get().n;
+    const r = await guest('POST', '/api/store/checkout', {
+      customer: { name: 'Mallory', email: 'mallory@example.com' },
+      lines: [{ product_id: membership.id, qty: 1, member: { member_id: victim.id } }],
+      card: { number: GOOD_CARD },
+    });
+    assert.equal(r.status, 400);
+    assert.equal(r.data.error, 'bad_member'); // same error as a nonexistent id
+    assert.ok(!JSON.stringify(r.data).includes(victim.pass_code)); // gate credential stays secret
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n, ordersBefore);
+    assert.equal(
+      db.prepare('SELECT expires_at FROM members WHERE id = ?').get(victim.id).expires_at,
+      victim.expires_at // no paid-for renewal of someone else's pass
+    );
+  });
+
+  await t.test('web renewal succeeds when the member email matches the buyer', async () => {
+    const mine = db.prepare('SELECT * FROM members WHERE lower(email) = ?').get(buyerEmail);
+    const r = await guest('POST', '/api/store/checkout', {
+      customer: { name: 'Gwen Guest', email: buyerEmail },
+      lines: [{ product_id: membership.id, qty: 1, member: { member_id: mine.id } }],
+      card: { number: GOOD_CARD },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.order.members.length, 1);
+    assert.equal(r.data.order.members[0].member_no, mine.member_no); // same member, pass shown
+    const after = db.prepare('SELECT expires_at FROM members WHERE id = ?').get(mine.id);
+    assert.ok(Date.parse(after.expires_at) > Date.parse(mine.expires_at));
+  });
+
+  await t.test('order lookup never reveals another member renewed on the order', async () => {
+    // POS (staff-gated) renews Dana on an order carrying a different buyer email…
+    const victim = db.prepare("SELECT * FROM members WHERE email = 'dana@example.com'").get();
+    const r = await cashier('POST', '/api/pos/orders', {
+      lines: [{ product_id: membership.id, qty: 1, member: { member_id: victim.id } }],
+      customer: { name: 'Walk Up', email: 'walkup@example.com' },
+    });
+    assert.equal(r.status, 200);
+    const fin = await cashier('POST', `/api/pos/orders/${r.data.order.id}/finalize`, {
+      payments: [{ method: 'cash', amount_cents: r.data.order.total_cents }],
+    });
+    assert.equal(fin.status, 200);
+    // …the buyer's guest lookup must not surface Dana's pass code
+    const look = await guest(
+      'GET',
+      `/api/store/order?code=${fin.data.order.confirmation}&email=walkup@example.com`
+    );
+    assert.equal(look.status, 200);
+    assert.equal(look.data.order.members.length, 0);
+    assert.ok(!JSON.stringify(look.data).includes(victim.pass_code));
+    // internal member ids never appear on guest lines either
+    assert.equal(look.data.order.lines[0].member_id, undefined);
+  });
+
+  await t.test('pre-change (legacy) order still shows the member pass card', async () => {
+    // A row from before the member-order-lines migration: membership line with no
+    // member_id/member_intent — the member is found via the order email fallback.
+    const mine = db.prepare('SELECT * FROM members WHERE lower(email) = ?').get(buyerEmail);
+    db.prepare(
+      `INSERT INTO orders (confirmation, channel, status, customer_name, customer_email,
+         subtotal_cents, total_cents, created_at, paid_at)
+       VALUES ('W-LEGACY01', 'web', 'paid', 'Gwen Guest', ?, 9900, 9900,
+               '2025-01-01T00:00:00.000Z', '2025-01-01T00:00:01.000Z')`
+    ).run(buyerEmail);
+    const legacyOrderId = db
+      .prepare("SELECT id FROM orders WHERE confirmation = 'W-LEGACY01'").get().id;
+    db.prepare(
+      `INSERT INTO order_lines (order_id, product_id, description, qty, unit_price_cents,
+         line_total_cents)
+       VALUES (?, ?, ?, 1, 9900, 9900)`
+    ).run(legacyOrderId, membership.id, membership.name);
+    const r = await guest(
+      'GET',
+      `/api/store/order?code=W-LEGACY01&email=${encodeURIComponent(buyerEmail)}`
+    );
+    assert.equal(r.status, 200);
+    assert.equal(r.data.order.members.length, 1);
+    assert.equal(r.data.order.members[0].member_no, mine.member_no);
+  });
+
+  await t.test('member name with markup: description stripped, member card is plain data', async () => {
+    const r = await guest('POST', '/api/store/checkout', {
+      customer: { name: 'Xavier', email: 'xavier@example.com' },
+      lines: [
+        {
+          product_id: membership.id,
+          qty: 1,
+          member: { name: '<script>alert(1)</script>Bob', email: 'bob@example.com' },
+        },
+      ],
+      card: { number: GOOD_CARD },
+    });
+    assert.equal(r.status, 200);
+    // display description keeps the [<>()] strip — no markup survives in the text
+    assert.doesNotMatch(r.data.order.lines[0].description, /<script>/);
+    assert.match(r.data.order.lines[0].description, /scriptalert1/);
+    assert.equal(r.data.order.members.length, 1); // minted by this order → shown
+    assert.ok(db.prepare("SELECT 1 FROM members WHERE email = 'bob@example.com'").get());
+  });
+
   await t.test('bad discount code at checkout is rejected before payment', async () => {
     const ordersBefore = db.prepare('SELECT COUNT(*) AS n FROM orders').get().n;
     const r = await guest('POST', '/api/store/checkout', {

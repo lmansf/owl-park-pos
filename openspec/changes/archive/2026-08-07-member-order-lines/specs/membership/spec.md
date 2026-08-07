@@ -23,8 +23,10 @@ which becomes display-only.
 ### Requirement: Legacy line backfill
 
 The migration SHALL best-effort backfill structured columns from the legacy
-"(renewal #N)" / "(for Name <email>)" description formats on existing paid orders, and
-SHALL leave unparseable rows untouched (columns NULL) rather than guessing.
+"(renewal #N)" / "(for Name <email>)" description formats on existing orders regardless
+of status — open orders included, so a pre-migration open renewal finalized after deploy
+still targets the right member — and SHALL leave unparseable rows untouched (columns
+NULL) rather than guessing.
 
 #### Scenario: Historical renewal is queryable
 - **WHEN** the migration runs on a DB containing a pre-change renewal line "(renewal #7)"

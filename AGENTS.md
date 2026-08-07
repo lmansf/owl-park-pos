@@ -19,7 +19,8 @@ demo mode beyond localhost. `OWLPOS_MODE=production` hardens auth (fail-closed
 - Two invariant chokepoints: `pos.finalizeOrder` (the only path that marks orders paid,
   issues tickets, moves session capacity — POS and web store both use it) and
   `admissions.checkCode` (the only admit/deny path; always writes an `admits` row).
-- Sharp edge: membership info on order lines is text-encoded in the line description
-  ("(renewal #N)" / "(for Name <email>)") because order_lines has no member column; pos.js
-  writes it, store.js parses it — change both together or add a column via migration.
+- Membership on order lines is structured: `order_lines.member_id` (renewal target,
+  stamped at finalize) and `member_intent` (server-written JSON {name, email} for a new
+  member) — pos.js writes them, finalizeOrder consumes them. Line descriptions are
+  display-only; never parse member info out of them.
 - Day boundaries ("today", report bucketing) are server-local time throughout.
