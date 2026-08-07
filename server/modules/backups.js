@@ -21,6 +21,15 @@ const RETAIN_DEFAULT = 14;
 
 let running = false; // at most one backup in flight per process
 
+// The snapshot inherits the source's WAL mode, so SQLite drops -shm/-wal
+// sidecars beside the .tmp working file; they're stale the moment the .tmp is
+// verified (or abandoned) and must be removed with it.
+const TMP_RE = /\.tmp(?:-shm|-wal)?$/;
+
+function rmTmp(tmpPath) {
+  for (const suffix of ['', '-shm', '-wal']) fs.rmSync(tmpPath + suffix, { force: true });
+}
+
 // Config: settings row wins, then env, then default. Values are clamped, never
 // trusted raw (a settings row is operator-editable data, not code).
 function configInt(ctx, key, envName, fallback, min, max) {
@@ -99,7 +108,8 @@ async function runBackup(ctx, { trigger = 'manual', userId = null } = {}) {
   try {
     fs.mkdirSync(ctx.backupDir, { recursive: true });
     for (const f of fs.readdirSync(ctx.backupDir)) {
-      if (f.endsWith('.tmp') && NAME_RE.test(f.slice(0, -4))) fs.unlinkSync(path.join(ctx.backupDir, f));
+      const m = TMP_RE.exec(f);
+      if (m && NAME_RE.test(f.slice(0, m.index))) fs.unlinkSync(path.join(ctx.backupDir, f));
     }
 
     let name = `owlpark-${tsName()}-${trigger}.db`;
@@ -119,11 +129,12 @@ async function runBackup(ctx, { trigger = 'manual', userId = null } = {}) {
       check.close();
       if (row.integrity_check !== 'ok') throw new Error(`integrity_check: ${row.integrity_check}`);
     } catch (err) {
-      fs.unlinkSync(tmpPath);
+      rmTmp(tmpPath);
       throw err;
     }
     fs.chmodSync(tmpPath, 0o600); // full DB copy: scrypt hashes, member PII
     fs.renameSync(tmpPath, finalPath);
+    rmTmp(tmpPath); // only the sidecars remain after the rename
 
     // Roadmap WAL policy: checkpoint + truncate after every snapshot so the
     // WAL never grows without bound.
