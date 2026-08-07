@@ -107,6 +107,16 @@ test('backups: snapshot, rotation, concurrency, restore, security', async (t) =>
     snap.close();
   });
 
+  await t.test('no .tmp working files or WAL sidecars survive a run', async () => {
+    // simulate a crash mid-backup: orphaned working file plus its sidecars
+    for (const suffix of ['', '-shm', '-wal']) {
+      fs.writeFileSync(path.join(backupDir, `owlpark-20200101T000000-manual.db.tmp${suffix}`), 'stale');
+    }
+    await backups.runBackup(ctx, { trigger: 'manual' });
+    const leftovers = fs.readdirSync(backupDir).filter((n) => /\.tmp(?:-shm|-wal)?$/.test(n));
+    assert.deepEqual(leftovers, [], 'backup dir holds only finished snapshots');
+  });
+
   await t.test('second backup while one runs is 409', async () => {
     const first = backups.runBackup(ctx, { trigger: 'manual' });
     await assert.rejects(backups.runBackup(ctx, { trigger: 'manual' }), (err) => {
