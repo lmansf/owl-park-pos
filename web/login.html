@@ -11,6 +11,7 @@
   .login-card h1 { font-size: 22px; margin: 0 0 4px; }
   .login-card .op-muted { margin: 0 0 18px; }
   .demo { font-size: 12px; margin-top: 14px; }
+  .lockout-hint { font-size: 12px; margin-top: 10px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -25,20 +26,89 @@
       <input name="password" type="password" autocomplete="current-password" required style="width:100%">
     </label>
     <button class="op-btn" style="width:100%">Sign in</button>
-    <p class="demo op-muted">Demo: admin/admin · manager/manager · cashier/cashier · gate/gate</p>
+    <p class="demo op-muted" hidden>Demo: admin/admin · manager/manager · cashier/cashier · gate/gate</p>
+    <p class="lockout-hint" id="lockout-hint" hidden>Too many attempts? Wait 15 minutes or contact a manager.</p>
+  </form>
+
+  <!-- Shown instead of the login form when a password change is required (or requested). -->
+  <form class="op-card login-card" id="pw-form" hidden>
+    <h1>OWL PARK <span class="op-muted">POS</span></h1>
+    <p class="op-muted" id="pw-why">Set a new password to continue.</p>
+    <label class="op-field"><span>Current password</span>
+      <input name="current_password" type="password" autocomplete="current-password" required style="width:100%">
+    </label>
+    <label class="op-field"><span>New password (8+ characters)</span>
+      <input name="new_password" type="password" autocomplete="new-password" minlength="8" required style="width:100%">
+    </label>
+    <label class="op-field"><span>Confirm new password</span>
+      <input name="confirm_password" type="password" autocomplete="new-password" minlength="8" required style="width:100%">
+    </label>
+    <button class="op-btn" style="width:100%">Set password</button>
   </form>
 </div>
 <script src="/shell.js"></script>
 <script>
+  const params = new URLSearchParams(location.search);
+  const nextUrl = () => params.get('next') || null;
+  let sessionUser = null;
+
+  // health drives the demo-credentials hint: only demo mode advertises passwords
+  fetch('/api/health').then((r) => r.json()).then((h) => {
+    if (!h.mode || h.mode === 'demo') document.querySelector('.demo').hidden = false;
+  }).catch(() => {});
+
+  function showPwForm(user) {
+    sessionUser = user;
+    document.getElementById('login-form').hidden = true;
+    const f = document.getElementById('pw-form');
+    f.hidden = false;
+    f.elements.current_password.focus();
+  }
+
+  function continueOn(user) {
+    location.href = nextUrl() || (user && user.role === 'gate' ? '/admissions.html' : '/index.html');
+  }
+
+  // pw=1: arrived from the shell (change requested) or a password_change_required
+  // bounce — if already signed in, go straight to the change card.
+  if (params.get('pw')) {
+    op.api('/api/auth/me').then(({ user }) => showPwForm(user)).catch(() => {});
+  }
+
+  let fails = 0;
   document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     try {
-      const { user } = await op.api('/api/auth/login', {
+      const res = await op.api('/api/auth/login', {
         body: { username: fd.get('username'), password: fd.get('password') },
       });
-      const next = new URLSearchParams(location.search).get('next');
-      location.href = next || (user.role === 'gate' ? '/admissions.html' : '/index.html');
+      const health = await fetch('/api/health').then((r) => r.json()).catch(() => ({}));
+      // forced change is enforced server-side in production; surface it up front
+      if (res.must_change_password && health.mode === 'production') showPwForm(res.user);
+      else continueOn(res.user);
+    } catch {
+      // failures are deliberately generic server-side; after a few, hint at lockout
+      if (++fails >= 3) document.getElementById('lockout-hint').hidden = false;
+    }
+  });
+
+  document.getElementById('pw-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    if (fd.get('new_password') !== fd.get('confirm_password')) {
+      op.toast('New passwords do not match', 'err');
+      return;
+    }
+    try {
+      await op.api('/api/auth/change-password', {
+        body: {
+          current_password: fd.get('current_password'),
+          new_password: fd.get('new_password'),
+        },
+      });
+      op.toast('Password updated', 'ok');
+      continueOn(sessionUser);
     } catch { /* toast already shown */ }
   });
 </script>

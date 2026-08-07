@@ -96,6 +96,15 @@
   .stub .holder { border-bottom: 1px solid #999; min-height: 20px; }
   .receipt-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-bottom: 16px; }
 
+  /* approver modal: full-width bottom sheet on phones so the keyboard
+     doesn't cover the password field */
+  @media (max-width: 480px) {
+    dialog.op-modal.approver {
+      position: fixed; inset: auto 0 0 0; width: 100%; max-width: none;
+      margin: 0; border-radius: 12px 12px 0 0;
+    }
+  }
+
   @media print {
     .no-print { display: none !important; }
     .op-main { max-width: none; padding: 0; }
@@ -180,6 +189,19 @@
   <div class="op-right" style="display:flex; gap:8px; justify-content:flex-end">
     <button class="op-btn secondary" id="mem-cancel">Cancel</button>
     <button class="op-btn" id="mem-add">Add to cart</button>
+  </div>
+</dialog>
+
+<dialog class="op-modal approver" id="dlg-approve">
+  <h2 id="appr-title">Manager approval</h2>
+  <p class="op-muted" id="appr-msg"></p>
+  <label class="op-field"><span>Manager username</span>
+    <input id="appr-user" autocomplete="username" style="width:100%"></label>
+  <label class="op-field"><span>Manager password</span>
+    <input id="appr-pass" type="password" autocomplete="current-password" style="width:100%"></label>
+  <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px">
+    <button class="op-btn secondary" id="appr-cancel">Cancel</button>
+    <button class="op-btn danger" id="appr-ok">Approve</button>
   </div>
 </dialog>
 
@@ -475,6 +497,36 @@
     renderCart();
   };
 
+  // ---------- manager approval (void/refund re-auth) ----------
+  // The server demands approver {username, password} resolving to an active
+  // manager/admin on every void/refund; this modal collects it. Managers get
+  // their own username pre-filled so it's password-only.
+  const dlgAppr = $('dlg-approve');
+  let apprResolve = null;
+  function approverPrompt(title, msg) {
+    $('appr-title').textContent = title;
+    $('appr-msg').textContent = msg;
+    $('appr-user').value = isManager ? me.username : '';
+    $('appr-pass').value = '';
+    dlgAppr.showModal();
+    (isManager ? $('appr-pass') : $('appr-user')).focus();
+    return new Promise((resolve) => { apprResolve = resolve; });
+  }
+  function apprDone(v) {
+    if (apprResolve) { apprResolve(v); apprResolve = null; }
+  }
+  $('appr-cancel').onclick = () => { dlgAppr.close(); apprDone(null); };
+  dlgAppr.addEventListener('close', () => apprDone(null)); // Esc key
+  $('appr-ok').onclick = () => {
+    const username = $('appr-user').value.trim(), password = $('appr-pass').value;
+    if (!username || !password) { op.toast('Enter manager credentials', 'err'); return; }
+    apprDone({ username, password });
+    dlgAppr.close();
+  };
+  $('appr-pass').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $('appr-ok').onclick(); }
+  });
+
   // ---------- tender ----------
   const dlgTender = $('dlg-tender');
   let tenders = [];
@@ -628,22 +680,30 @@
     acts.push(`<button class="op-btn" id="act-print">Print</button>`);
     if (receiptFrom === 'orders') acts.push(`<button class="op-btn secondary" id="act-back">Back to orders</button>`);
     acts.push(`<button class="op-btn secondary" id="act-new">New sale</button>`);
-    if (isManager && order.status === 'open') acts.push(`<button class="op-btn danger" id="act-void">Void order</button>`);
-    if (isManager && order.status === 'paid') acts.push(`<button class="op-btn danger" id="act-refund">Refund order</button>`);
+    if (order.status === 'open') acts.push(`<button class="op-btn danger" id="act-void">Void order</button>`);
+    if (order.status === 'paid') acts.push(`<button class="op-btn danger" id="act-refund">Refund order</button>`);
     $('receipt-actions').innerHTML = acts.join('') + ` ${statusBadge(order.status)}`;
     $('act-print').onclick = () => window.print();
     $('act-new').onclick = () => show('sell');
     if ($('act-back')) $('act-back').onclick = () => { show('orders'); searchOrders(); };
     if ($('act-void')) $('act-void').onclick = async () => {
-      const r = await op.api(`/api/pos/orders/${order.id}/void`, { body: {} });
-      op.toast('Order voided', 'ok');
-      renderReceipt(r.order, {});
+      const approver = await approverPrompt('Void order', 'Voiding this open order needs manager approval.');
+      if (!approver) return;
+      try {
+        const r = await op.api(`/api/pos/orders/${order.id}/void`, { body: { approver } });
+        op.toast('Order voided', 'ok');
+        renderReceipt(r.order, {});
+      } catch { /* toast already shown */ }
     };
     if ($('act-refund')) $('act-refund').onclick = async () => {
-      if (!confirm('Refund this order in full? Tickets will be voided.')) return;
-      const r = await op.api(`/api/pos/orders/${order.id}/refund`, { body: {} });
-      op.toast('Order refunded — ' + r.voided_tickets + ' ticket(s) voided', 'ok');
-      renderReceipt(r.order, {});
+      const approver = await approverPrompt('Refund order',
+        'Full refund — tickets will be voided. Needs manager approval.');
+      if (!approver) return;
+      try {
+        const r = await op.api(`/api/pos/orders/${order.id}/refund`, { body: { approver } });
+        op.toast('Order refunded — ' + r.voided_tickets + ' ticket(s) voided', 'ok');
+        renderReceipt(r.order, {});
+      } catch { /* toast already shown */ }
     };
   }
 
