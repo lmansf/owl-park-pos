@@ -32,8 +32,13 @@ back to the current static layout — a fresh install must look unchanged.
 ### Requirement: Guest safety
 
 `/api/store/layout` is anonymous and SHALL only expose web-channel active products
-(resolved server-side through the shared sellable feed); html sections are rendered from
-admin-authored content only, and section config is never echoed beyond what the page needs.
+(resolved server-side through the shared sellable feed), and section config is never
+echoed beyond what the page needs. Html section bodies render unescaped on the guest
+page — same origin as the back office — so they SHALL pass through the allowlist
+sanitiser (`storefront.sanitizeHtml`) on write AND on read (cleaning rows stored before
+the guard existed): only known content tags and attributes survive, URLs are
+entity-decoded and scheme-checked, and script/style/iframe/svg/math/form and event
+handlers never do.
 
 #### Scenario: No back-door products
 - **WHEN** a pos-only product is hand-picked into a products section

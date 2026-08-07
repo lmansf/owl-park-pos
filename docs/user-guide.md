@@ -73,7 +73,8 @@ member pass (`M-…`) code and press Enter — a full-panel green OK or red DENI
 shows the holder and, when denied, the machine reason (`expired`, `exhausted`,
 `wrong_session_time`, `void`, `unknown`, `suspended`). Session tickets admit from 30
 minutes before their session start until session end. The page shows today's admit count
-and the last scans. The gate name (top right) is remembered on this device across
+and the last scans (codes appear masked — pass codes are credentials, and the feed is
+visible at every gate). The gate name (top right) is remembered on this device across
 reloads, and the scan box re-grabs focus after stray taps — a scanner never types into
 the void. Managers/admins also get a **simulator** drawer listing currently
 valid tickets and active members for one-click demo scans.
@@ -147,7 +148,9 @@ totals roll up per group, products in no group land under **Ungrouped**, and pro
 multiple groups count in each group — the report footer discloses that group totals can
 therefore exceed the grand total. Member and unknown-code scans carry no product, so the
 grouped Admissions report counts them in the footer instead of a group row. The CSV
-download follows whichever mode is on screen.
+download follows whichever mode is on screen. In every CSV export, text cells starting
+with `=`, `+`, `-`, or `@` get a leading apostrophe so spreadsheets show them as text
+instead of running them as formulas; money and count columns are unaffected.
 
 ### Backups (`/backups.html`) — admin only
 Snapshot list with sizes and triggers, a **Back up now** button, disk-space and
@@ -170,8 +173,10 @@ always declines** (for testing the failure path). The cart shows the exact tax a
 that will be charged, validates the three fields inline before anything is sent, and
 Enter submits from any field. The confirmation page shows print-at-home
 tickets with barcodes, one per page when printed. Lost the tab? `/store/order.html` re-opens
-any order with its `W-…` confirmation code plus the checkout email. Memberships bought
-online show the printable pass card on the confirmation page.
+any order with its `W-…` confirmation code plus the checkout email. New memberships
+bought online show the printable pass card on the confirmation page; a renewal of an
+existing member is confirmed by member number and new expiry only — the pass card
+stays private to its holder, since anyone knowing the email could open the order.
 
 ## Try this end-to-end
 
@@ -201,11 +206,17 @@ online show the printable pass card on the confirmation page.
   carrying an active demo password (from a demo-mode seed or a restored demo snapshot)
   refuses to start in production until those accounts are rotated or deactivated.
   Session cookies are marked `Secure` (put the server behind HTTPS), and the login page
-  stops advertising demo credentials. In every mode, login is
-  rate-limited, five consecutive wrong passwords lock an account for 15 minutes (failed
+  stops advertising demo credentials. Behind a reverse proxy, also set
+  `OWLPOS_TRUST_PROXY=1` so login rate limiting keys on real client addresses from
+  `X-Forwarded-For` instead of the proxy's single address — never set it on a directly
+  exposed server, where that header is attacker-controlled. In every mode, login is
+  rate-limited per client address and account, five consecutive wrong passwords lock an
+  account for 15 minutes (failed
   attempts land in the audit log), voids/refunds require a manager to enter their own
   credentials, and the Password button in the top bar changes your password — which also
-  signs out every other session for the account.
+  signs out every other session for the account. **Sign out** does the same: it revokes
+  every session for your account (not just this browser's cookie) — the right behavior
+  on shared POS stations.
 
 ## Backup and restore runbook
 
@@ -227,7 +238,11 @@ online show the printable pass card on the confirmation page.
   The tool verifies the snapshot's integrity, refuses snapshots created by newer code
   than this checkout, keeps your current database beside the restored one as
   `owlpark-pos-pre-restore-<timestamp>.db`, and records the restore in the audit log.
-  Older snapshots are fine — pending migrations apply on the next start. Use `--db <path>`
-  for a non-default database location; `--force` overrides the freshness/name checks.
+  Older snapshots are fine — pending migrations apply on the next start. While the
+  database's `-wal`/`-shm` sidecar files exist the tool refuses to run — they mean the
+  server is still running (stop it first) or crashed without a clean shutdown; only in
+  the crash case pass `--force` to proceed anyway. Any failure mid-restore rolls back
+  and leaves your original database in place. Use `--db <path>` for a non-default
+  database location.
 - **Health:** `/api/health` shows disk-free, database size, and last-backup time to
   signed-in admins/managers; the shell shows a persistent banner when disk is low.

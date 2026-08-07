@@ -6,7 +6,8 @@ server-local day, derived read-only from orders, payments, tickets, and admits.
 ## Requirements
 ### Requirement: Dashboard
 
-`web/index.html` (all back-office roles) SHALL show today at a glance: revenue, orders,
+`web/index.html` (seller roles — cashier, manager, admin; the gate role is admissions-only
+and gets 403) SHALL show today at a glance: revenue, orders,
 tickets sold, admits, in-park estimate (admits today), member count, next sessions with
 fill %. Numbers come from `GET /api/reports/dashboard` computed live from the DB. For
 managers and admins only, the dashboard payload additionally includes today's revenue by
@@ -26,9 +27,15 @@ totals row and CSV download (`?format=csv`):
 - **Admissions** — per day: scans, admits, denials by reason; per-gate breakdown.
 - **Memberships** — sold/renewed per program, active count, upcoming expirations (30 days).
 
+Every CSV export (this applies to the shared CSV writer, so drawer, journal, and Z
+exports too) SHALL neutralise formula injection: a text cell starting with `=` `+` `-`
+`@` (or tab/CR) gets a leading apostrophe, while numeric cells — including negative
+money amounts — are emitted untouched.
+
 #### Scenario: CSV matches table
 - **WHEN** a sales summary is downloaded as CSV
-- **THEN** rows and totals equal the on-screen table for the same filters.
+- **THEN** rows and totals equal the on-screen table for the same filters (text cells
+  that would be executed by a spreadsheet differ only by the apostrophe prefix).
 
 ### Requirement: Reconciliation invariants
 
