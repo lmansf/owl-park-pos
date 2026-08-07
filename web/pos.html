@@ -124,8 +124,8 @@
   .refund-line .amt { min-width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
   .refund-total { display: flex; justify-content: space-between; font-weight: 700; font-size: 18px; border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px; }
 
-  /* approver + refund modals: full-width bottom sheet on phones so the
-     keyboard doesn't cover fields and thumbs reach the confirm buttons */
+  /* approver + sheet modals (refund, drawer): full-width bottom sheet on phones
+     so the keyboard doesn't cover fields and thumbs reach the confirm buttons */
   @media (max-width: 480px) {
     dialog.op-modal.approver, dialog.op-modal.sheet {
       position: fixed; inset: auto 0 0 0; width: 100%; max-width: none;
@@ -260,7 +260,7 @@
   </div>
 </dialog>
 
-<dialog class="op-modal" id="dlg-drawer">
+<dialog class="op-modal sheet" id="dlg-drawer">
   <h2>Cash drawer</h2>
   <div id="drawer-body"></div>
 </dialog>

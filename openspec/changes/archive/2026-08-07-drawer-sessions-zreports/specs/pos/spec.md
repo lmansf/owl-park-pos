@@ -4,10 +4,13 @@
 
 ### Requirement: Tender and finalize
 
-Checkout SHALL accept split tenders of `cash` (with change calculation) and `card_sim`
-(always approves, generates a fake auth ref). When tenders cover the total, the order is
-finalized through the shared posting path: order → paid, tickets issued, capacity counted,
-audit logged. Insufficient tender cannot finalize.
+Checkout SHALL accept split tenders drawn from the tender registry. Built-in tenders are
+`cash` (with change calculation) and `card_sim` (always approves, generates a fake auth
+ref); each registry entry declares its method key, label, change behavior, and a
+simulated authorize hook. When tenders cover the total, the order is finalized through
+the shared posting path: order → paid, tickets issued, capacity counted, audit logged.
+Insufficient tender cannot finalize. Adding a tender SHALL NOT require modifying
+`finalizeOrder` or any DDL.
 
 POS-channel payments SHALL be stamped with the cashier's open drawer session inside the
 finalize transaction; a cash-bearing POS finalize with no open drawer for the order's
