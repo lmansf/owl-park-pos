@@ -37,13 +37,16 @@ It's a demo deployment, not a system of record.
 
 ## Design
 
-Spec-driven via OpenSpec: see `openspec/changes/` for each change's proposal, design (module
-boundaries and frozen cross-module contracts), per-system spec deltas, and tasks —
-`pos-mvp` (the core suite) and `back-office-builders` (standalone editors: item config,
-item groups, POS menu builder, webstore builder, discounts, chart of accounts, price
-programs). The short
+Spec-driven via OpenSpec: current per-system specs live in `openspec/specs/`, and in-flight
+proposals live in `openspec/changes/`. The two shipped changes — `pos-mvp` (the core suite)
+and `back-office-builders` (standalone editors: item config, item groups, POS menu builder,
+webstore builder, discounts, chart of accounts, price programs) — are archived under
+`openspec/changes/archive/`, where each keeps its proposal, design (module boundaries and
+frozen cross-module contracts), spec deltas, and tasks. The short
 version: every module under `server/modules/` owns its routes and exports a small contract;
 orders are finalized through one shared posting path (`pos.finalizeOrder`), and every gate
 decision goes through one shared validation path (`admissions.checkCode`).
 
 Demo only: payments are simulated and auth is demo-grade — do not expose beyond localhost.
+What separates this demo from a production deployment is outlined in
+[docs/production-roadmap.md](docs/production-roadmap.md).
