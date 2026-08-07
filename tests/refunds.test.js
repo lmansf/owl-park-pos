@@ -520,6 +520,11 @@ test('pos: session exchange — capacity-guarded void + reissue', async (t) => {
     const scan = await mgr('POST', '/api/admissions/scan', { code: plTickets[1].code });
     // still a live ticket (ok inside its window, wrong_session_time outside — never void)
     assert.notEqual(scan.data.reason, 'void');
+    // an 'ok' scan CONSUMES the ticket, and whether the seeded session is in its
+    // window right now depends on the wall clock — put it back so the exchange and
+    // refund subtests below run the same way at every hour of the day
+    db.prepare("UPDATE tickets SET status = 'valid', uses_remaining = ? WHERE id = ?")
+      .run(plTickets[1].uses_remaining, plTickets[1].id);
   });
 
   await t.test('rejects: same session, cancelled session, other event, bad ids, wrong ticket state', async () => {
@@ -761,5 +766,114 @@ test('reporting: partial refunds and exchanges keep reports and the journal hone
     assert.equal(ev.length, 1);
     assert.equal(ev[0].qty, 1);
     assert.equal(ev[0].total_cents, o2.total_cents);
+  });
+});
+
+test('pos: refunding a membership takes the membership back', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const cashier = await login(base, 'cashier');
+  const mgr = await login(base, 'manager');
+  const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
+  const memExp = sell.find((p) => p.sku === 'MEM-EXP');
+
+  await t.test('a refunded new membership stops admitting at the gate', async () => {
+    const o = await paidOrder(
+      cashier,
+      [{ product_id: memExp.id, qty: 1, member: { name: 'Wanda Refund', email: 'wanda@example.com' } }],
+      [{ method: 'card_sim', amount_cents: 9900 }]
+    );
+    const member = db.prepare("SELECT * FROM members WHERE lower(email) = 'wanda@example.com'").get();
+    assert.equal(member.status, 'active');
+    // it admits while it is paid for
+    const before = await mgr('POST', '/api/admissions/scan', { code: member.pass_code });
+    assert.equal(before.data.result, 'ok');
+
+    const r = await mgr('POST', `/api/pos/orders/${o.id}/refund`, { approver: APPROVER });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.order.status, 'refunded');
+    assert.deepEqual(
+      r.data.revoked_members.map((m) => [m.member_no, m.action]),
+      [[member.member_no, 'suspended']]
+    );
+    const after = db.prepare('SELECT * FROM members WHERE id = ?').get(member.id);
+    assert.equal(after.status, 'suspended', 'money back = membership back');
+    const scan = await mgr('POST', '/api/admissions/scan', { code: member.pass_code });
+    assert.equal(scan.data.result, 'denied', 'a refunded pass must not buy a free year');
+    // the reversal shows on the audit row a manager reads
+    const detail = JSON.parse(
+      db.prepare("SELECT detail FROM audit_log WHERE action = 'pos.order.refund' ORDER BY id DESC LIMIT 1")
+        .get().detail
+    );
+    assert.equal(detail.members[0].member_no, member.member_no);
+  });
+
+  await t.test('a refunded renewal gives back only the year that was refunded', async () => {
+    await paidOrder(
+      cashier,
+      [{ product_id: memExp.id, qty: 1, member: { name: 'Rene Newal', email: 'rene@example.com' } }],
+      [{ method: 'card_sim', amount_cents: 9900 }]
+    );
+    const member = db.prepare("SELECT * FROM members WHERE lower(email) = 'rene@example.com'").get();
+    const paidThrough = Date.parse(member.expires_at);
+
+    const renewal = await paidOrder(
+      cashier,
+      [{ product_id: memExp.id, qty: 1, member: { member_id: member.id } }],
+      [{ method: 'card_sim', amount_cents: 9900 }]
+    );
+    const extended = db.prepare('SELECT * FROM members WHERE id = ?').get(member.id);
+    assert.ok(Date.parse(extended.expires_at) > paidThrough);
+
+    const r = await mgr('POST', `/api/pos/orders/${renewal.id}/refund`, { approver: APPROVER });
+    assert.equal(r.status, 200);
+    const back = db.prepare('SELECT * FROM members WHERE id = ?').get(member.id);
+    assert.equal(back.status, 'active', 'the year they still paid for survives');
+    assert.equal(Date.parse(back.expires_at), paidThrough, 'only the refunded year comes off');
+    const scan = await mgr('POST', '/api/admissions/scan', { code: member.pass_code });
+    assert.equal(scan.data.result, 'ok');
+  });
+});
+
+test('pos: abandoning an open order needs no manager', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const cashier = await login(base, 'cashier');
+  const gate = await login(base, 'gate');
+  const mgr = await login(base, 'manager');
+  const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
+  const adult = sell.find((p) => p.sku === 'ADULT');
+  const open = async () => (
+    await cashier('POST', '/api/pos/orders', { lines: [{ product_id: adult.id, qty: 1 }] })
+  ).data.order;
+
+  await t.test('the seller who opened it can drop it, no approver typed', async () => {
+    const o = await open();
+    const r = await cashier('POST', `/api/pos/orders/${o.id}/abandon`, {});
+    assert.equal(r.status, 200);
+    assert.equal(r.data.order.status, 'void');
+    assert.equal(
+      db.prepare("SELECT COUNT(*) n FROM orders WHERE status = 'open'").get().n, 0,
+      'an abandoned tender leaves no orphaned open order behind'
+    );
+    const a = db
+      .prepare("SELECT * FROM audit_log WHERE action = 'pos.order.abandon' ORDER BY id DESC LIMIT 1")
+      .get();
+    assert.equal(JSON.parse(a.detail).order_id, o.id);
+  });
+
+  await t.test('managers can drop anyone’s; the gate role cannot touch it', async () => {
+    const mine = await open();
+    assert.equal((await gate('POST', `/api/pos/orders/${mine.id}/abandon`, {})).status, 403);
+    assert.equal((await mgr('POST', `/api/pos/orders/${mine.id}/abandon`, {})).status, 200);
+  });
+
+  await t.test('paid orders are never abandonable — refund is the only way back', async () => {
+    assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 10000 })).status, 200);
+    const paid = await paidOrder(cashier, [{ product_id: adult.id, qty: 1 }]);
+    const r = await cashier('POST', `/api/pos/orders/${paid.id}/abandon`, {});
+    assert.equal(r.status, 409);
+    assert.equal(r.data.error, 'not_voidable');
+    assert.equal(db.prepare('SELECT status FROM orders WHERE id = ?').get(paid.id).status, 'paid');
   });
 });
