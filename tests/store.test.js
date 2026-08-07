@@ -36,6 +36,32 @@ function client(base) {
   };
 }
 
+// The real guest renderer (web/store/store.js) on a minimal DOM shim, so what the
+// assertions see is what a guest's confirmation page actually prints. barcode39 calls
+// are recorded instead of drawn — an empty code there is a blank, unscannable card.
+function renderOrder(order) {
+  const vm = require('node:vm');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'store', 'store.js'), 'utf8');
+  const codes = [];
+  const sandbox = {
+    window: { barcode39: (el, code) => codes.push(code) },
+    document: { getElementById: () => null },
+    localStorage: { getItem: () => null, setItem: () => {} },
+  };
+  vm.runInContext(src, vm.createContext(sandbox));
+  const mount = {
+    html: '',
+    set innerHTML(v) { this.html = v; },
+    get innerHTML() { return this.html; },
+    querySelectorAll() {
+      return [...this.html.matchAll(/class="bc" data-code="([^"]*)"/g)]
+        .map((m) => ({ dataset: { code: m[1] } }));
+    },
+  };
+  sandbox.window.gs.renderOrder(order, mount);
+  return { html: mount.html, codes };
+}
+
 const GOOD_CARD = '4242 4242 4242 4242';
 const DECLINE_CARD = '4000 0000 0000 0002';
 
@@ -255,6 +281,35 @@ test('store: guest storefront APIs', async (t) => {
     assert.equal(r.data.order.members[0].member_no, mine.member_no); // same member, pass shown
     const after = db.prepare('SELECT expires_at FROM members WHERE id = ?').get(mine.id);
     assert.ok(Date.parse(after.expires_at) > Date.parse(mine.expires_at));
+  });
+
+  await t.test('renewal prints an acknowledgement, never a blank barcode', async () => {
+    const mine = db.prepare('SELECT * FROM members WHERE lower(email) = ?').get(buyerEmail);
+    const r = await guest('POST', '/api/store/checkout', {
+      customer: { name: 'Gwen Guest', email: buyerEmail },
+      lines: [{ product_id: membership.id, qty: 1, member: { member_id: mine.id } }],
+      card: { number: GOOD_CARD },
+    });
+    assert.equal(r.status, 200);
+    const card = r.data.order.members[0];
+    assert.equal(card.renewal, true);
+    assert.equal(card.pass_code, ''); // credential withheld: the email is unverified
+
+    const { html, codes } = renderOrder(r.data.order);
+    assert.ok(!codes.includes(''), 'an empty Code 39 barcode was rendered');
+    assert.ok(!html.includes('data-code=""'), 'blank barcode slot on the pass card');
+    assert.match(html, /keep using your existing membership pass/);
+    assert.ok(html.includes(card.member_no), 'the renewal is still acknowledged');
+
+    // …while a membership this order minted still prints its scannable pass
+    const fresh = await guest('POST', '/api/store/checkout', {
+      customer: { name: 'Nina New', email: 'nina.new@example.com' },
+      lines: [{ product_id: membership.id, qty: 1 }],
+      card: { number: GOOD_CARD },
+    });
+    const minted = renderOrder(fresh.data.order);
+    assert.match(fresh.data.order.members[0].pass_code, /^M-[A-Z0-9]{10}$/);
+    assert.deepEqual(minted.codes, [fresh.data.order.members[0].pass_code]);
   });
 
   await t.test('order lookup never reveals another member renewed on the order', async () => {
