@@ -23,7 +23,7 @@ none of which exist yet.
   `server.listen`, `api.error`).
 - `/api/health` gains role-gated fields (admin/manager only): `disk_free_bytes`,
   `db_bytes`, `disk_low`, `last_backup_at`. Anonymous callers keep exactly
-  `{ ok, ephemeral }`.
+  `{ ok, ephemeral, mode }`.
 - New admin-only `web/backups.html` (list, back-up-now, disk gauge, delete) plus a
   low-disk shell banner. Backups are disabled (400 `ephemeral`) on serverless hosting.
 - Config via existing `settings` keys `backups.interval_min` / `backups.retain` (env

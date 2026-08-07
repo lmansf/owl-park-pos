@@ -163,7 +163,9 @@ online show the printable pass card on the confirmation page.
   treat the copies as sensitive.
 - **Taking one:** the Backups page (**Back up now**) or wait for the scheduler. Tune with
   `settings` keys `backups.interval_min` (0 disables the scheduler) and `backups.retain`,
-  or env `OWLPOS_BACKUP_INTERVAL_MIN` / `OWLPOS_BACKUP_RETAIN`.
+  or env `OWLPOS_BACKUP_INTERVAL_MIN` / `OWLPOS_BACKUP_RETAIN`. The scheduler reads
+  `interval_min` at startup, so restart the server after changing it; `retain` takes
+  effect on the next backup.
 - **Restoring:** stop the server, then:
 
   ```

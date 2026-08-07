@@ -43,7 +43,8 @@ function createApp(dbPath = DB_PATH, opts = {}) {
   const ctx = {
     db,
     dbPath,
-    backupDir: process.env.OWLPOS_BACKUP_DIR || path.join(path.dirname(dbPath), 'backups'),
+    backupDir: env.OWLPOS_BACKUP_DIR || path.join(path.dirname(dbPath), 'backups'),
+    env,
     modules: {},
   };
 

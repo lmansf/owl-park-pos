@@ -23,20 +23,20 @@ let running = false; // at most one backup in flight per process
 
 // Config: settings row wins, then env, then default. Values are clamped, never
 // trusted raw (a settings row is operator-editable data, not code).
-function configInt(db, key, envName, fallback, min, max) {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-  const raw = row ? row.value : process.env[envName];
+function configInt(ctx, key, envName, fallback, min, max) {
+  const row = ctx.db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  const raw = row ? row.value : (ctx.env || process.env)[envName];
   const n = Number(raw);
   if (raw === undefined || !Number.isInteger(n)) return fallback;
   return Math.min(max, Math.max(min, n));
 }
 
-function intervalMin(db) {
-  return configInt(db, 'backups.interval_min', 'OWLPOS_BACKUP_INTERVAL_MIN', INTERVAL_DEFAULT_MIN, 0, 1440);
+function intervalMin(ctx) {
+  return configInt(ctx, 'backups.interval_min', 'OWLPOS_BACKUP_INTERVAL_MIN', INTERVAL_DEFAULT_MIN, 0, 1440);
 }
 
-function retainCount(db) {
-  return configInt(db, 'backups.retain', 'OWLPOS_BACKUP_RETAIN', RETAIN_DEFAULT, 1, 365);
+function retainCount(ctx) {
+  return configInt(ctx, 'backups.retain', 'OWLPOS_BACKUP_RETAIN', RETAIN_DEFAULT, 1, 365);
 }
 
 // Server-local timestamp (day boundaries are server-local throughout the suite).
@@ -99,7 +99,7 @@ async function runBackup(ctx, { trigger = 'manual', userId = null } = {}) {
   try {
     fs.mkdirSync(ctx.backupDir, { recursive: true });
     for (const f of fs.readdirSync(ctx.backupDir)) {
-      if (f.endsWith('.tmp')) fs.unlinkSync(path.join(ctx.backupDir, f));
+      if (f.endsWith('.tmp') && NAME_RE.test(f.slice(0, -4))) fs.unlinkSync(path.join(ctx.backupDir, f));
     }
 
     let name = `owlpark-${tsName()}-${trigger}.db`;
@@ -129,7 +129,7 @@ async function runBackup(ctx, { trigger = 'manual', userId = null } = {}) {
     // WAL never grows without bound.
     ctx.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
 
-    prune(ctx, retainCount(ctx.db), userId);
+    prune(ctx, retainCount(ctx), userId);
 
     const bytes = fs.statSync(finalPath).size;
     const ms = Date.now() - started;
@@ -142,14 +142,15 @@ async function runBackup(ctx, { trigger = 'manual', userId = null } = {}) {
 }
 
 function mount(router, ctx) {
+  const env = ctx.env || process.env;
   router.get('/api/backups', ['admin', 'manager'], () => ({
     backups: listBackups(ctx),
-    retain: retainCount(ctx.db),
-    interval_min: intervalMin(ctx.db),
+    retain: retainCount(ctx),
+    interval_min: intervalMin(ctx),
   }));
 
   router.post('/api/backups/run', ['admin'], async (req) => {
-    if (process.env.VERCEL) {
+    if (env.VERCEL) {
       throw new ApiError(400, 'ephemeral', 'Hosted demo databases are ephemeral — backups are disabled');
     }
     const result = await runBackup(ctx, { trigger: 'manual', userId: req.user.id });
@@ -168,10 +169,13 @@ function mount(router, ctx) {
 
   // Scheduler: unref'd so tests and the smoke runner exit cleanly; never on
   // serverless (each warm instance would back up its own throwaway /tmp DB).
-  const interval = intervalMin(ctx.db);
-  if (interval > 0 && !process.env.VERCEL) {
+  const interval = intervalMin(ctx);
+  if (interval > 0 && !env.VERCEL) {
     setInterval(() => {
-      runBackup(ctx, { trigger: 'scheduled' }).catch((err) => logError('backup.failed', err));
+      runBackup(ctx, { trigger: 'scheduled' }).catch((err) => {
+        if (err.code === 'backup_running') log('info', 'backup.skipped', { reason: err.code });
+        else logError('backup.failed', err);
+      });
     }, interval * 60_000).unref();
   }
 }

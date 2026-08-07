@@ -224,14 +224,14 @@ restored database. It SHALL exit non-zero without touching the target on any fai
 
 ### Requirement: Operational health fields
 
-`GET /api/health` SHALL remain public and SHALL return exactly `{ ok, ephemeral }` to
-anonymous, cashier, and gate callers. For admin and manager sessions it SHALL append
+`GET /api/health` SHALL remain public and SHALL return exactly `{ ok, ephemeral, mode }`
+to anonymous, cashier, and gate callers. For admin and manager sessions it SHALL append
 `disk_free_bytes`, `db_bytes`, `disk_low` (free space below 500 MB), and
 `last_backup_at`; the shell SHALL show a persistent low-disk banner when `disk_low`.
 
 #### Scenario: Anonymous caller learns nothing
 - **WHEN** `/api/health` is fetched without a session
-- **THEN** the response body has exactly the keys `ok` and `ephemeral`.
+- **THEN** the response body has exactly the keys `ok`, `ephemeral`, and `mode`.
 
 ### Requirement: Structured logs
 
