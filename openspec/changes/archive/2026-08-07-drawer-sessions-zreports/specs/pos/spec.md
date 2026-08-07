@@ -21,6 +21,11 @@ payments)` signature is unchanged — the drawer is resolved internally.
 - **THEN** the order finalizes, change $6.50 is displayed, and a payments row records both
   amounts.
 
+#### Scenario: New tender is additive
+- **WHEN** a `voucher` tender is registered and used for an exact-amount payment
+- **THEN** the order finalizes through the unchanged posting path and the payments row
+  records method `voucher`.
+
 #### Scenario: Cash without a drawer cannot finalize
 - **WHEN** a cashier with no open drawer session finalizes a POS order with any cash
   tender
