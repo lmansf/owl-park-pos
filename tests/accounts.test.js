@@ -160,6 +160,8 @@ test('accounts: journal balances to the cent over mixed activity', async (t) => 
   t.after(() => server.close());
   const cashier = await login(base, 'cashier');
   const manager = await login(base, 'manager');
+  // POS cash needs an open drawer session (drawer-sessions-zreports)
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 20000 })).status, 200);
 
   const sellable = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
   const bySku = (sku) => sellable.find((p) => p.sku === sku);
@@ -261,6 +263,8 @@ test('accounts: unmapped product posts to 9999 suspense, then remaps', async (t)
   t.after(() => server.close());
   const admin = await login(base, 'admin');
   const cashier = await login(base, 'cashier');
+  // POS cash needs an open drawer session (drawer-sessions-zreports)
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 20000 })).status, 200);
 
   // a just-created product has no mapping (defaults were seeded at first mount)
   const taxGroups = (await admin('GET', '/api/catalog/tax-groups')).data.tax_groups;

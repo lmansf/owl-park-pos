@@ -56,6 +56,8 @@ test('reports: dashboard, four reports, CSV parity, reconciliation', async (t) =
   assert.equal((await manager.call('POST', '/api/auth/login', { username: 'manager', password: 'manager' })).status, 200);
   assert.equal((await cashier.call('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' })).status, 200);
   assert.equal((await gate.call('POST', '/api/auth/login', { username: 'gate', password: 'gate' })).status, 200);
+  // POS cash needs an open drawer session (drawer-sessions-zreports)
+  assert.equal((await cashier.call('POST', '/api/drawer/open', { float_cents: 20000 })).status, 200);
 
   await t.test('role gates', async () => {
     const anon = await fetch(app.base + '/api/reports/dashboard');

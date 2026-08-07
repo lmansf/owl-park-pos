@@ -47,6 +47,8 @@ test('pos: pricing, posting path, tenders, void/refund', async (t) => {
   await cashier('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
   const mgr = client(base);
   await mgr('POST', '/api/auth/login', { username: 'manager', password: 'manager' });
+  // POS cash needs an open drawer session (drawer-sessions-zreports)
+  assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 20000 })).status, 200);
 
   // seed lookups
   const { data: sell } = await cashier('GET', '/api/catalog/sellable?channel=pos');

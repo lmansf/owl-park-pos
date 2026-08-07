@@ -69,6 +69,16 @@ async function main() {
   ok(order.discount_cents === Math.round(gross * 0.10), 'SAVE10 discounted 10% of gross');
   ok(order.total_cents === order.subtotal_cents - order.discount_cents + order.tax_cents, 'total = subtotal - discount + tax');
 
+  // cash requires an open drawer session — the failed attempt rolls back fully
+  const noDrawer = await cashier('POST', `/api/pos/orders/${order.id}/finalize`, {
+    payments: [{ method: 'cash', amount_cents: order.total_cents }],
+  });
+  ok(noDrawer.status === 409 && noDrawer.data.error === 'no_open_drawer',
+    'cash finalize without an open drawer → 409 no_open_drawer');
+  const drawerOpen = await cashier('POST', '/api/drawer/open', { float_cents: 20000 });
+  ok(drawerOpen.status === 200 && drawerOpen.data.session.status === 'open',
+    'cashier opens a $200-float drawer');
+
   const short = await cashier('POST', `/api/pos/orders/${order.id}/finalize`, {
     payments: [{ method: 'cash', amount_cents: 100 }],
   });
@@ -148,6 +158,9 @@ async function main() {
   ok(memberScan.data.result === 'ok', 'member pass admits');
 
   console.log('— refund —');
+  // the manager opens their own drawer so the cash refund is attributed to it
+  ok((await manager('POST', '/api/drawer/open', { float_cents: 5000 })).status === 200,
+    'manager opens a $50-float drawer');
   const noApprover = await manager('POST', `/api/pos/orders/${order.id}/refund`, {});
   ok(noApprover.status === 403, 'refund without manager re-auth is refused');
   const refund = await manager('POST', `/api/pos/orders/${order.id}/refund`, {
@@ -354,6 +367,44 @@ async function main() {
     assert.equal(t.dr, t.cr, `journal balances on ${day}`);
   }
   passed++; console.log('  ✔ journal debits equal credits every day');
+
+  console.log('— drawer sessions: blind close, Z, reconciliation —');
+  // ledger movement, then blind-close. The cashier drawer saw exactly one cash
+  // payment all run: the $50.00 part of the split tender (change 0).
+  ok((await cashier('POST', '/api/drawer/movements', {
+    kind: 'paid_out', amount_cents: 1500, reason: 'ice run',
+  })).status === 200, 'paid-out recorded');
+  const current = await cashier('GET', '/api/drawer/current');
+  ok(!JSON.stringify(current.data).includes('expected'),
+    'pre-close drawer view stays blind (no expected cash anywhere)');
+  // expected = 20000 float − 1500 paid out + 5000 cash = 23500; count 23400 → $1 short
+  const zClose = await cashier('POST', '/api/drawer/close', { counted_cents: 23400, note: 'smoke close' });
+  ok(zClose.status === 200 && zClose.data.session.z_number === 1, 'blind close issues Z #1');
+  ok(zClose.data.session.expected_cents === 23500, 'expected = float + cash − paid-outs');
+  ok(zClose.data.session.over_short_cents === -100, 'over/short = counted − expected (−100)');
+  const zCash = zClose.data.sections.find((s) => s.title === 'Payments by method')
+    .rows.find((r) => r.method === 'cash');
+  const dbCash = db.prepare(
+    `SELECT COALESCE(SUM(amount_cents - change_cents),0) AS s
+     FROM payments WHERE drawer_session_id = ? AND method = 'cash'`
+  ).get(zClose.data.session.id).s;
+  ok(zCash.amount_cents === dbCash && dbCash === cashPart,
+    'Z payments-by-method equals the payments rows for the session');
+  // manager drawer took the cash refund: 5000 float − 5000 refund → expected 0
+  const mgrClose = await manager('POST', '/api/drawer/close', { counted_cents: 0 });
+  ok(mgrClose.status === 200 && mgrClose.data.session.expected_cents === 0
+    && mgrClose.data.session.over_short_cents === 0, 'refund netted out of the manager drawer');
+  const drawersRep = (await manager('GET', `/api/reports/drawers?from=${d}&to=${d}`)).data;
+  const drawersRows = drawersRep.sections.find((s) => s.title === 'Closed drawer sessions').rows;
+  ok(drawersRows.length === 2, 'drawers report lists both closed sessions');
+  ok(drawersRep.sections.find((s) => s.title === 'Unattributed POS cash').rows[0].amount_cents === 0,
+    'no unattributed POS cash with enforcement live');
+  ok(drawersRows.reduce((a, r) => a + r.over_short_cents, 0) === -100,
+    'park-day over/short totals −100');
+  const drawersCsv = await fetch(base + `/api/reports/drawers?from=${d}&to=${d}&format=csv`,
+    { headers: { cookie: jars.manager } });
+  ok(drawersCsv.status === 200 && (await drawersCsv.text()).includes('Unattributed POS cash'),
+    'drawers report CSV downloads');
 
   console.log('— security: lockout, recovery, session revocation —');
   let lockedOut = true;

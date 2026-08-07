@@ -147,6 +147,7 @@
     <button id="tab-sell" class="active">Sell</button>
     <button id="tab-orders">Orders</button>
     <button id="btn-terminal" class="pos-terminal" hidden></button>
+    <button id="btn-drawer" style="margin-left:auto">Drawer</button>
   </div>
 
   <!-- SELL -->
@@ -257,6 +258,11 @@
     <button class="op-btn secondary" id="appr-cancel">Cancel</button>
     <button class="op-btn danger" id="appr-ok">Approve</button>
   </div>
+</dialog>
+
+<dialog class="op-modal" id="dlg-drawer">
+  <h2>Cash drawer</h2>
+  <div id="drawer-body"></div>
 </dialog>
 
 <dialog class="op-modal" id="dlg-tender">
@@ -726,6 +732,12 @@
       if (result.change_cents > 0) op.toast('Change due: ' + money(result.change_cents), 'ok');
     } catch (err) {
       if (err.code === 'capacity') dlgTender.close();
+      if (err.code === 'no_open_drawer') {
+        // cash needs a drawer — take the cashier straight to the open form
+        dlgTender.close();
+        await refreshDrawer();
+        openDrawerDialog();
+      }
       /* toast already shown by op.api */
     }
   };
@@ -836,6 +848,157 @@
         }
       };
     }
+  // ---------- cash drawer ----------
+  // Blind-close by design: this dialog never shows a running cash total or the
+  // expected amount for an open session — the server does not send them. Over/
+  // short appears only on the Z view after closing.
+  const dlgDrawer = $('dlg-drawer');
+  let drawerState = { session: null };
+  // like parseAmt but 0 is a legal value (an empty float / empty till count)
+  function parseCents0(v) {
+    const n = Math.round(parseFloat(String(v).replace(/[$,]/g, '')) * 100);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  }
+  async function refreshDrawer() {
+    try { drawerState = await op.api('/api/drawer/current'); } catch { drawerState = { session: null }; }
+    $('btn-drawer').textContent = drawerState.session ? 'Drawer · OPEN' : 'Drawer';
+  }
+  function openDrawerDialog() { renderDrawer(); dlgDrawer.showModal(); }
+  $('btn-drawer').onclick = async () => { await refreshDrawer(); openDrawerDialog(); };
+
+  function renderDrawer() {
+    const box = $('drawer-body');
+    const s = drawerState.session;
+    if (!s) {
+      box.innerHTML = `
+        <p class="op-muted">No open drawer. Count your opening float to start taking cash.</p>
+        <div class="tender-row"><span style="width:52px">Float</span>
+          <input id="dw-float" inputmode="decimal" placeholder="0.00"></div>
+        <div class="tender-quick" id="dw-float-quick"></div>
+        <label class="op-field"><span>Terminal</span>
+          <input id="dw-terminal" value="main" maxlength="40" style="width:100%"></label>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px">
+          <button class="op-btn secondary" id="dw-cancel">Close window</button>
+          <button class="op-btn ok" id="dw-open">Open drawer</button>
+        </div>`;
+      for (const cents of [10000, 15000, 20000]) {
+        const b = document.createElement('button');
+        b.className = 'op-btn secondary';
+        b.textContent = money(cents);
+        b.onclick = () => { $('dw-float').value = (cents / 100).toFixed(2); };
+        $('dw-float-quick').appendChild(b);
+      }
+      $('dw-cancel').onclick = () => dlgDrawer.close();
+      $('dw-open').onclick = async () => {
+        const float = parseCents0($('dw-float').value || '0');
+        if (float === null) return op.toast('Enter the opening float', 'err');
+        try {
+          drawerState = await op.api('/api/drawer/open', {
+            body: { float_cents: float, terminal: $('dw-terminal').value.trim() || 'main' },
+          });
+          $('btn-drawer').textContent = 'Drawer · OPEN';
+          op.toast('Drawer open', 'ok');
+          renderDrawer();
+        } catch { /* toast already shown */ }
+      };
+      return;
+    }
+    const moves = drawerState.movements.map((m) => `
+      <div style="display:flex; justify-content:space-between; gap:8px; padding:2px 0">
+        <span>${m.kind === 'paid_in' ? 'In' : 'Out'} · ${esc(m.reason)}</span>
+        <span style="font-variant-numeric:tabular-nums">${m.kind === 'paid_out' ? '−' : ''}${money(m.amount_cents)}</span>
+      </div>`).join('');
+    box.innerHTML = `
+      <p><span class="op-badge ok">open</span>
+        Float <strong>${money(s.open_float_cents)}</strong>
+        · ${op.fmtDate(s.opened_at)} ${op.fmtTime(s.opened_at)} · ${esc(s.terminal)}</p>
+      <p class="op-muted">${drawerState.payment_count} payment(s) this session.</p>
+      <h3 style="margin:12px 0 6px">Paid in / out</h3>
+      ${moves || '<p class="op-muted">No movements yet.</p>'}
+      <div class="tender-row" style="margin-top:8px">
+        <select id="mv-kind" style="font:inherit; padding:8px">
+          <option value="paid_in">Paid in</option>
+          <option value="paid_out">Paid out</option>
+        </select>
+        <input id="mv-amt" inputmode="decimal" placeholder="0.00">
+      </div>
+      <div class="tender-row">
+        <input id="mv-reason" placeholder="Reason (required)" maxlength="200" style="flex:1; width:auto">
+        <button class="op-btn secondary" id="mv-add">Add</button>
+      </div>
+      <h3 style="margin:14px 0 6px">Blind close</h3>
+      <p class="op-muted">Count the till and enter the total. Expected cash and over/short
+        are revealed only after closing.</p>
+      <div class="tender-row"><span style="width:64px">Counted</span>
+        <input id="dw-counted" inputmode="decimal" placeholder="0.00"></div>
+      <div class="tender-row">
+        <input id="dw-note" placeholder="Note (optional)" maxlength="500" style="flex:1; width:auto"></div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px">
+        <button class="op-btn secondary" id="dw-cancel">Close window</button>
+        <button class="op-btn danger" id="dw-close">Close drawer</button>
+      </div>`;
+    $('dw-cancel').onclick = () => dlgDrawer.close();
+    $('mv-add').onclick = async () => {
+      const amt = parseAmt($('mv-amt').value);
+      const reason = $('mv-reason').value.trim();
+      if (!amt) return op.toast('Enter a movement amount', 'err');
+      if (!reason) return op.toast('A reason is required', 'err');
+      try {
+        await op.api('/api/drawer/movements', {
+          body: { kind: $('mv-kind').value, amount_cents: amt, reason },
+        });
+        await refreshDrawer();
+        renderDrawer();
+      } catch { /* toast already shown */ }
+    };
+    $('dw-close').onclick = async () => {
+      const counted = $('dw-counted').value.trim() === '' ? null : parseCents0($('dw-counted').value);
+      if (counted === null) return op.toast('Enter the counted cash total', 'err');
+      try {
+        const z = await op.api('/api/drawer/close', {
+          body: { counted_cents: counted, note: $('dw-note').value.trim() },
+        });
+        dlgDrawer.close();
+        await refreshDrawer();
+        renderZ(z);
+      } catch { /* toast already shown */ }
+    };
+  }
+
+  // Z view rides the receipt paper/print pattern so the Z can be printed and
+  // dropped in the till.
+  function renderZ(z) {
+    const s = z.session;
+    const os = s.over_short_cents;
+    const fmtZ = (c, v) => /_cents$/.test(c) ? money(v)
+      : c === 'created_at' ? `${op.fmtDate(v)} ${op.fmtTime(v)}` : String(v ?? '');
+    const secTable = (sec) => `
+      <div class="rule"></div>
+      <div style="font-weight:700">${esc(sec.title)}</div>
+      <table>${sec.rows.map((r) => `
+        <tr>${sec.columns.map((c, i) =>
+          `<td class="${i > 0 ? 'num' : ''}">${esc(fmtZ(c, r[c]))}</td>`).join('')}</tr>`).join('')}
+      </table>`;
+    $('receipt').innerHTML = `
+      <div class="paper print-block">
+        <h3>Z-REPORT #${Number(s.z_number)}</h3>
+        <div class="muted">${esc(s.terminal)} · ${esc(s.opened_by_name)}
+          · opened ${new Date(s.opened_at).toLocaleString()}</div>
+        <div class="muted">closed ${new Date(s.closed_at).toLocaleString()}
+          by ${esc(s.closed_by_name || '')}</div>
+        ${z.sections.map(secTable).join('')}
+        <div class="rule"></div>
+        <div style="display:flex; justify-content:space-between; font-weight:700; font-size:17px;
+                    color:${os === 0 ? '#0a0' : '#c00'}">
+          <span>OVER/SHORT</span><span>${os > 0 ? '+' : ''}${money(os)}</span></div>
+        ${s.close_note ? `<div class="muted">Note: ${esc(s.close_note)}</div>` : ''}
+      </div>`;
+    $('receipt-actions').innerHTML =
+      `<button class="op-btn" id="act-print">Print</button>
+       <button class="op-btn secondary" id="act-new">New sale</button>`;
+    $('act-print').onclick = () => window.print();
+    $('act-new').onclick = () => show('sell');
+    show('receipt');
   }
 
   // ---------- receipt ----------
@@ -966,6 +1129,7 @@
   renderTerminalChip();
   await Promise.all([loadProducts(), loadTenders()]);
   renderCart();
+  await refreshDrawer();
 })();
 </script>
 </body>

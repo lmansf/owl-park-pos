@@ -322,6 +322,21 @@ function finalizeOrder(db, ctx, orderId, payments) {
       );
     }
 
+    // --- drawer attribution (POS channel only): cash needs the cashier's open
+    // drawer; the session is re-resolved INSIDE this tx so a concurrently
+    // closed drawer can never be stamped. Web-channel payments stay NULL.
+    let drawerSessionId = null;
+    if (order.channel === 'pos') {
+      // actual cash only (drawer.isCashMethod), not every change-bearing tender
+      const cashSum = pays.reduce(
+        (a, p) => a + (ctx.modules.drawer.isCashMethod(p.method) ? p.amount : 0), 0);
+      const drawer = ctx.modules.drawer.openSessionFor(db, order.cashier_id);
+      if (drawer) drawerSessionId = drawer.id;
+      else if (cashSum > 0) {
+        throw new ApiError(409, 'no_open_drawer', 'Open a cash drawer before taking cash');
+      }
+    }
+
     const at = now();
 
     // --- capacity: reserve per session line (throws 409 'capacity' -> full rollback)
@@ -376,11 +391,13 @@ function finalizeOrder(db, ctx, orderId, payments) {
     let lastChangeIdx = -1;
     pays.forEach((p, i) => { if (p.change) lastChangeIdx = i; });
     const insPay = db.prepare(
-      `INSERT INTO payments (order_id, method, amount_cents, change_cents, ref, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO payments (order_id, method, amount_cents, change_cents, ref, created_at,
+         drawer_session_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     );
     pays.forEach((p, i) =>
-      insPay.run(orderId, p.method, p.amount, i === lastChangeIdx ? change : 0, p.ref, at)
+      insPay.run(orderId, p.method, p.amount, i === lastChangeIdx ? change : 0, p.ref, at,
+        drawerSessionId)
     );
 
     const detail = getOrderDetail(db, orderId);
@@ -388,6 +405,7 @@ function finalizeOrder(db, ctx, orderId, payments) {
       order_id: orderId, confirmation, channel: order.channel,
       total_cents: order.total_cents, change_cents: change,
       tickets: detail.tickets.length, members: members.length,
+      ...(drawerSessionId != null ? { drawer_session_id: drawerSessionId } : {}),
     });
     return { order: detail, tickets: detail.tickets, members, change_cents: change };
   });
@@ -466,6 +484,12 @@ function refundOrder(db, ctx, orderId, userId, approverId, selection) {
     }
 
     const at = now();
+
+    // Refunds never REQUIRE a drawer; if the acting user has one open, the
+    // negative rows are attributed to it (cash refunds then net out of that
+    // drawer's expected). Otherwise NULL — visible on the unattributed line
+    // of the drawers report, never silent.
+    const refundDrawer = ctx.modules.drawer.openSessionFor(db, userId ?? null);
 
     // --- per-line money: proportional over the unrefunded remainder, so the
     // last refund of a line always takes the exact leftover cents -------------
@@ -576,15 +600,18 @@ function refundOrder(db, ctx, orderId, userId, approverId, selection) {
       throw new ApiError(409, 'refund_exceeds_payments', 'Refund exceeds remaining payments');
     }
     const insPay = db.prepare(
-      `INSERT INTO payments (order_id, method, amount_cents, change_cents, ref, created_at)
-       VALUES (?, ?, ?, 0, 'REFUND', ?)`
+      `INSERT INTO payments (order_id, method, amount_cents, change_cents, ref, created_at,
+         drawer_session_id)
+       VALUES (?, ?, ?, 0, 'REFUND', ?, ?)`
     );
     let remRefund = refundTotal;
     for (const m of methods) {
       const alloc = remTotal > 0 ? Math.round((remRefund * m.remaining) / remTotal) : 0;
       remRefund -= alloc;
       remTotal -= m.remaining;
-      if (alloc > 0) insPay.run(orderId, m.method, -alloc, at);
+      if (alloc > 0) {
+        insPay.run(orderId, m.method, -alloc, at, refundDrawer ? refundDrawer.id : null);
+      }
     }
 
     // --- derived order status ------------------------------------------------
@@ -672,6 +699,7 @@ function exchangeTicket(db, ctx, ticketId, targetSessionId, userId, approverId) 
       ticket_id: ticket.id, new_ticket_id: fresh.id,
       from_session: ticket.event_session_id, to_session: targetId,
       approved_by: approverId ?? null,
+      ...(refundDrawer ? { drawer_session_id: refundDrawer.id } : {}),
     });
     return {
       old_ticket: db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id),

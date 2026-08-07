@@ -45,6 +45,8 @@ test('store: guest storefront APIs', async (t) => {
   const guest = client(base); // never signs in
   const cashier = client(base);
   await cashier('POST', '/api/auth/login', { username: 'cashier', password: 'cashier' });
+  // POS cash needs an open drawer session (drawer-sessions-zreports)
+  await cashier('POST', '/api/drawer/open', { float_cents: 20000 });
 
   let catalog;
   let plntm; // planetarium timed product

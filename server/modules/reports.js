@@ -1,9 +1,9 @@
 'use strict';
 // reports — read-only aggregates over other modules' tables: the dashboard feed and
-// four date-ranged reports (sales, product-mix, admissions, memberships), each also
-// downloadable as CSV via ?format=csv. Sales and admissions additionally support
-// ?group_by=group (rollup by item group via the groups.js exports). Never writes
-// anything.
+// five date-ranged reports (sales, product-mix, admissions, memberships, drawers),
+// each also downloadable as CSV via ?format=csv. Sales and admissions additionally
+// support ?group_by=group (rollup by item group via the groups.js exports). Never
+// writes anything.
 //
 // Report JSON shape (uniform): { range: {from, to}, sections: [{ title, columns,
 // rows, totals }] } — rows are objects keyed by `columns`; `totals` is one more row
@@ -383,6 +383,55 @@ function membershipsReport(db, rng) {
   };
 }
 
+// ---------- drawer sessions ----------
+
+// Closed drawer sessions in range (bucketed by local close day) plus an
+// "Unattributed POS cash" cross-check: cash payments on pos-channel orders with
+// no drawer_session_id. With enforcement live that line should be 0 — anything
+// else is pre-drawer history or a refund taken without an open drawer.
+function drawersReport(db, rng) {
+  const columns = [
+    'date', 'z_number', 'cashier', 'terminal', 'float_cents', 'cash_cents',
+    'paid_in_cents', 'paid_out_cents', 'expected_cents', 'counted_cents',
+    'over_short_cents',
+  ];
+  const rows = db.prepare(
+    `SELECT date(ds.closed_at, 'localtime') AS date, ds.z_number,
+            u.display_name AS cashier, ds.terminal,
+            ds.open_float_cents AS float_cents,
+            COALESCE((SELECT SUM(p.amount_cents - p.change_cents) FROM payments p
+               WHERE p.drawer_session_id = ds.id AND p.method = 'cash'), 0) AS cash_cents,
+            COALESCE((SELECT SUM(m.amount_cents) FROM drawer_movements m
+               WHERE m.drawer_session_id = ds.id AND m.kind = 'paid_in'), 0) AS paid_in_cents,
+            COALESCE((SELECT SUM(m.amount_cents) FROM drawer_movements m
+               WHERE m.drawer_session_id = ds.id AND m.kind = 'paid_out'), 0) AS paid_out_cents,
+            ds.expected_cents, ds.counted_cents, ds.over_short_cents
+     FROM drawer_sessions ds JOIN users u ON u.id = ds.opened_by
+     WHERE ds.status = 'closed' AND ds.closed_at >= ? AND ds.closed_at < ?
+     ORDER BY ds.closed_at`
+  ).all(rng.fromIso, rng.toIso);
+  const totals = totalsOf(columns, rows, 'date');
+  totals.z_number = ''; // summing Z numbers is meaningless
+
+  const un = db.prepare(
+    `SELECT COUNT(*) AS payments,
+            COALESCE(SUM(p.amount_cents - p.change_cents), 0) AS amount_cents
+     FROM payments p JOIN orders o ON o.id = p.order_id
+     WHERE p.method = 'cash' AND p.drawer_session_id IS NULL AND o.channel = 'pos'
+       AND p.created_at >= ? AND p.created_at < ?`
+  ).get(rng.fromIso, rng.toIso);
+  const unColumns = ['item', 'payments', 'amount_cents'];
+  const unRows = [{ item: 'Unattributed POS cash', payments: un.payments, amount_cents: un.amount_cents }];
+
+  return {
+    range: { from: rng.from, to: rng.to },
+    sections: [
+      { title: 'Closed drawer sessions', columns, rows, totals },
+      { title: 'Unattributed POS cash', columns: unColumns, rows: unRows },
+    ],
+  };
+}
+
 // ---------- dashboard ----------
 
 function dashboard(db, groups) {
@@ -510,6 +559,11 @@ function mount(router, ctx) {
 
   router.get('/api/reports/memberships', MANAGERS, (req, res) =>
     respond(req, res, 'memberships', membershipsReport(db, parseRange(req.query))));
+
+  router.get('/api/reports/drawers', MANAGERS, (req, res) =>
+    respond(req, res, 'drawers', drawersReport(db, parseRange(req.query))));
 }
 
-module.exports = { mount };
+// parseRange/toCsvRows are additively exported for the drawer module (session
+// list ranges + Z-report CSVs) so range semantics and CSV shaping cannot drift.
+module.exports = { mount, parseRange, toCsvRows };
