@@ -182,6 +182,23 @@ async function main() {
   const groups = (await admin('GET', '/api/groups')).data.groups;
   ok(groups.find((g) => g.id === grp.id)?.product_count === 1, 'group created with product assigned');
 
+  console.log('— reports by group —');
+  const grouped = await manager('GET', `/api/reports/sales?from=${d}&to=${d}&group_by=group`);
+  ok(grouped.status === 200, 'grouped sales report loads');
+  const gsec = grouped.data.sections[0];
+  const dayTix = gsec.rows.find((r) => r.group === 'Day Tickets');
+  // 3 ADULT sold today: 2 in the (since refunded) POS order + 1 web — refunded
+  // orders still count on their paid day.
+  ok(dayTix && dayTix.units === 3 && dayTix.gross_cents === 3 * adult.price_cents,
+    "'Day Tickets' group gross equals the day's ADULT gross");
+  const ungrouped = gsec.rows.find((r) => r.group === 'Ungrouped');
+  ok(ungrouped && ungrouped.units > 0, 'Ungrouped row absorbs products in no group (PLNTM, MEM-EXP)');
+  ok(/count in each group/.test(gsec.note || ''), 'multi-group disclosure note present');
+  const gcsv = await fetch(base + `/api/reports/sales?from=${d}&to=${d}&group_by=group&format=csv`,
+    { headers: { cookie: jars.manager } });
+  ok(gcsv.status === 200 && (gcsv.headers.get('content-type') || '').includes('text/csv'),
+    'grouped sales CSV downloads');
+
   const page = (await admin('POST', '/api/menus/pages', { name: 'Front', sort: 1 })).data.page;
   await admin('POST', `/api/menus/pages/${page.id}/buttons`, { product_id: adult.id, position: 1, label: 'Adult' });
   const activeMenu = (await cashier('GET', '/api/menus/active')).data;

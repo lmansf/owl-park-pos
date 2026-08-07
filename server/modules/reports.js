@@ -1,12 +1,15 @@
 'use strict';
 // reports — read-only aggregates over other modules' tables: the dashboard feed and
 // four date-ranged reports (sales, product-mix, admissions, memberships), each also
-// downloadable as CSV via ?format=csv. Never writes anything.
+// downloadable as CSV via ?format=csv. Sales and admissions additionally support
+// ?group_by=group (rollup by item group via the groups.js exports). Never writes
+// anything.
 //
 // Report JSON shape (uniform): { range: {from, to}, sections: [{ title, columns,
 // rows, totals }] } — rows are objects keyed by `columns`; `totals` is one more row
-// object rendered as the totals line. The CSV is generated from the SAME structure,
-// so table and CSV can never drift apart.
+// object rendered as the totals line; an optional `note` string is a footnote under
+// the table. The CSV is generated from the SAME structure (note = trailing
+// single-cell row), so table and CSV can never drift apart.
 //
 // Day bucketing is by LOCAL calendar day (SQLite date(ts,'localtime')), matching how
 // the events module interprets date-only from/to and how admissions counts "today".
@@ -85,6 +88,7 @@ function toCsvRows(report) {
     out.push(s.columns);
     for (const r of s.rows) out.push(s.columns.map((c) => r[c] ?? ''));
     if (s.totals) out.push(s.columns.map((c) => s.totals[c] ?? ''));
+    if (s.note) out.push([s.note]); // footnote travels with the CSV too
   });
   return out;
 }
@@ -170,6 +174,116 @@ function salesReport(db, rng) {
   return {
     range: { from: rng.from, to: rng.to },
     sections: [{ title: 'Sales summary', columns, rows, totals: totalsOf(columns, rows, 'date') }],
+  };
+}
+
+// ---------- group rollups (sales / admissions by item group) ----------
+
+// Multi-group products count in every group they belong to (disclosed in the note),
+// so group totals may exceed the grand total. The disclosure sentence ships in both
+// the JSON section and the CSV so exports stay self-explaining.
+const MULTI_GROUP_NOTE =
+  'Products in multiple groups count in each group; group totals can exceed the grand ' +
+  'total. Ungrouped = products in no active group.';
+
+// Map product id -> active groups, via the frozen groups.js exports only (they encode
+// the active-only / deactivation semantics — never re-query item_groups from here).
+function groupIndex(db, groups) {
+  const list = groups.listGroups(db); // active only, sorted by sort, name, id
+  const byProduct = new Map();
+  for (const g of list) {
+    for (const pid of groups.productIdsInGroup(db, g.id)) {
+      if (!byProduct.has(pid)) byProduct.set(pid, []);
+      byProduct.get(pid).push(g);
+    }
+  }
+  return { list, byProduct };
+}
+
+// Fan per-product aggregate rows out to one bucket per group (or Ungrouped), summing
+// the numeric columns. Returns rows in listGroups order, Ungrouped last if nonzero.
+function distributeByGroup(idx, perProduct, numericCols, makeRow) {
+  const acc = new Map(); // group id | 'ungrouped' -> row
+  const rowFor = (key, label) => {
+    if (!acc.has(key)) acc.set(key, makeRow(label));
+    return acc.get(key);
+  };
+  for (const p of perProduct) {
+    const gs = idx.byProduct.get(p.product_id);
+    const targets = gs && gs.length
+      ? gs.map((g) => [g.id, g.name])
+      : [['ungrouped', 'Ungrouped']];
+    for (const [key, label] of targets) {
+      const row = rowFor(key, label);
+      for (const c of numericCols) row[c] += p[c];
+    }
+  }
+  const rows = idx.list.filter((g) => acc.has(g.id)).map((g) => acc.get(g.id));
+  if (acc.has('ungrouped')) rows.push(acc.get('ungrouped'));
+  return rows;
+}
+
+function salesByGroupReport(db, groups, rng) {
+  const columns = ['group', 'units', 'gross_cents', 'discount_cents', 'tax_cents', 'net_cents'];
+  // Per-product line aggregates over the same population as the sales summary /
+  // product mix (paid-day keyed, refunded orders still count on their paid day).
+  // Line-level discount/tax are exact integer-cent allocations (see pos.js), so
+  // per-group net = gross − discount reconciles to the penny.
+  const perProduct = db.prepare(
+    `SELECT ol.product_id,
+            SUM(ol.qty) AS units,
+            SUM(ol.qty * ol.unit_price_cents) AS gross_cents,
+            SUM(ol.discount_cents) AS discount_cents,
+            SUM(ol.tax_cents) AS tax_cents
+     FROM order_lines ol
+     JOIN orders o ON o.id = ol.order_id
+     WHERE o.paid_at >= ? AND o.paid_at < ? AND o.status IN ('paid', 'refunded')
+     GROUP BY ol.product_id`
+  ).all(rng.fromIso, rng.toIso);
+  const rows = distributeByGroup(
+    groupIndex(db, groups), perProduct,
+    ['units', 'gross_cents', 'discount_cents', 'tax_cents'],
+    (label) => ({ group: label, units: 0, gross_cents: 0, discount_cents: 0, tax_cents: 0 })
+  );
+  for (const r of rows) r.net_cents = r.gross_cents - r.discount_cents;
+  return {
+    range: { from: rng.from, to: rng.to },
+    sections: [{
+      title: 'Sales by item group', columns, rows,
+      totals: totalsOf(columns, rows, 'group'), note: MULTI_GROUP_NOTE,
+    }],
+  };
+}
+
+function admissionsByGroupReport(db, groups, rng) {
+  const columns = ['group', 'scans', 'admits', 'denied'];
+  // Only ticket scans carry a product; member/unknown scans (ticket_id NULL) are
+  // counted in the note, never itemized (no holder/member data in this report).
+  const perProduct = db.prepare(
+    `SELECT t.product_id, COUNT(*) AS scans,
+            COALESCE(SUM(a.result = 'ok'), 0) AS admits,
+            COALESCE(SUM(a.result = 'denied'), 0) AS denied
+     FROM admits a JOIN tickets t ON t.id = a.ticket_id
+     WHERE a.at >= ? AND a.at < ?
+     GROUP BY t.product_id`
+  ).all(rng.fromIso, rng.toIso);
+  const rows = distributeByGroup(
+    groupIndex(db, groups), perProduct,
+    ['scans', 'admits', 'denied'],
+    (label) => ({ group: label, scans: 0, admits: 0, denied: 0 })
+  );
+  const nonTicket = db.prepare(
+    'SELECT COUNT(*) AS n FROM admits WHERE at >= ? AND at < ? AND ticket_id IS NULL'
+  ).get(rng.fromIso, rng.toIso).n;
+  const note = MULTI_GROUP_NOTE + (nonTicket
+    ? ` ${nonTicket} member/unknown scan(s) have no ticket product and are not grouped.`
+    : '');
+  return {
+    range: { from: rng.from, to: rng.to },
+    sections: [{
+      title: 'Admissions by item group', columns, rows,
+      totals: totalsOf(columns, rows, 'group'), note,
+    }],
   };
 }
 
@@ -270,7 +384,7 @@ function membershipsReport(db, rng) {
 
 // ---------- dashboard ----------
 
-function dashboard(db) {
+function dashboard(db, groups) {
   const nowIso = now();
   const dayStart = (() => {
     const d = new Date();
@@ -310,7 +424,7 @@ function dashboard(db) {
     fill_pct: s.capacity > 0 ? Math.round((s.sold / s.capacity) * 100) : 0,
   }));
 
-  return {
+  const out = {
     as_of: nowIso,
     revenue_cents,
     orders_today,
@@ -321,6 +435,32 @@ function dashboard(db) {
     members_active,
     next_sessions,
   };
+
+  // Sales by group today, top 5 + Ungrouped. SALES-based (order lines of orders paid
+  // today, gross − discount + tax), NOT payments-based like revenue_cents — payments
+  // aren't line-attributed, so the two won't tie out on refund days.
+  if (groups) {
+    const idx = groupIndex(db, groups);
+    const perProduct = db.prepare(
+      `SELECT ol.product_id,
+              SUM(ol.qty * ol.unit_price_cents - ol.discount_cents + ol.tax_cents) AS revenue_cents
+       FROM order_lines ol
+       JOIN orders o ON o.id = ol.order_id
+       WHERE o.paid_at >= ? AND o.status IN ('paid', 'refunded')
+       GROUP BY ol.product_id`
+    ).all(dayStart);
+    const rows = distributeByGroup(idx, perProduct, ['revenue_cents'],
+      (label) => ({ group: label, revenue_cents: 0 }));
+    // Ungrouped bucket (when present) is always the last row from distributeByGroup.
+    const hasUngrouped = perProduct.some((p) => !(idx.byProduct.get(p.product_id) || []).length);
+    const ungrouped = hasUngrouped ? rows[rows.length - 1] : null;
+    const grouped = rows.filter((r) => r !== ungrouped)
+      .sort((a, b) => b.revenue_cents - a.revenue_cents)
+      .slice(0, 5);
+    out.revenue_by_group_today = ungrouped ? [...grouped, ungrouped] : grouped;
+  }
+
+  return out;
 }
 
 // ---------- mount ----------
@@ -328,16 +468,44 @@ function dashboard(db) {
 function mount(router, ctx) {
   const db = ctx.db;
 
-  router.get('/api/reports/dashboard', [], () => dashboard(db));
+  // Soft dependency on the item-groups module (present via auto-mount; guarded like
+  // menus/storefront so group mode degrades to a clean 400 if it's ever absent).
+  const groupsMod = ctx.modules?.groups;
+  const hasGroups = Boolean(groupsMod
+    && typeof groupsMod.listGroups === 'function'
+    && typeof groupsMod.productIdsInGroup === 'function');
 
-  router.get('/api/reports/sales', MANAGERS, (req, res) =>
-    respond(req, res, 'sales', salesReport(db, parseRange(req.query))));
+  // Strict allowlist: absent/'' = plain report, 'group' = group mode, else 400.
+  // Never alters authz — the role gate runs before the handler either way.
+  const groupMode = (req) => {
+    const mode = String(req.query.group_by || '');
+    if (!mode) return false;
+    if (mode !== 'group') throw new ApiError(400, 'bad_param', 'group_by must be "group"');
+    if (!hasGroups) {
+      throw new ApiError(400, 'groups_unavailable', 'The item-groups module is not available');
+    }
+    return true;
+  };
+
+  router.get('/api/reports/dashboard', [], (req) =>
+    dashboard(db, hasGroups && MANAGERS.includes(req.user.role) ? groupsMod : null));
+
+  router.get('/api/reports/sales', MANAGERS, (req, res) => {
+    const rng = parseRange(req.query);
+    return groupMode(req)
+      ? respond(req, res, 'sales-by-group', salesByGroupReport(db, groupsMod, rng))
+      : respond(req, res, 'sales', salesReport(db, rng));
+  });
 
   router.get('/api/reports/product-mix', MANAGERS, (req, res) =>
     respond(req, res, 'product-mix', productMixReport(db, parseRange(req.query))));
 
-  router.get('/api/reports/admissions', MANAGERS, (req, res) =>
-    respond(req, res, 'admissions', admissionsReport(db, parseRange(req.query))));
+  router.get('/api/reports/admissions', MANAGERS, (req, res) => {
+    const rng = parseRange(req.query);
+    return groupMode(req)
+      ? respond(req, res, 'admissions-by-group', admissionsByGroupReport(db, groupsMod, rng))
+      : respond(req, res, 'admissions', admissionsReport(db, rng));
+  });
 
   router.get('/api/reports/memberships', MANAGERS, (req, res) =>
     respond(req, res, 'memberships', membershipsReport(db, parseRange(req.query))));
