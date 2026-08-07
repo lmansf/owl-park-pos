@@ -38,15 +38,17 @@ It's a demo deployment, not a system of record.
 ## Design
 
 Spec-driven via OpenSpec: current per-system specs live in `openspec/specs/`, and in-flight
-proposals live in `openspec/changes/`. The two shipped changes — `pos-mvp` (the core suite)
-and `back-office-builders` (standalone editors: item config, item groups, POS menu builder,
-webstore builder, discounts, chart of accounts, price programs) — are archived under
-`openspec/changes/archive/`, where each keeps its proposal, design (module boundaries and
-frozen cross-module contracts), spec deltas, and tasks. The short
+proposals live in `openspec/changes/`. Shipped changes are archived under
+`openspec/changes/archive/`, where each keeps its proposal, design, spec deltas, and
+tasks; the founding `pos-mvp` change holds the module boundaries and frozen cross-module
+contracts. The short
 version: every module under `server/modules/` owns its routes and exports a small contract;
 orders are finalized through one shared posting path (`pos.finalizeOrder`), and every gate
 decision goes through one shared validation path (`admissions.checkCode`).
 
-Demo only: payments are simulated and auth is demo-grade — do not expose beyond localhost.
-What separates this demo from a production deployment is outlined in
+Payments are simulated throughout, and in the default demo mode auth is demo-grade — do
+not expose demo mode beyond localhost. Setting `OWLPOS_MODE=production` hardens auth
+(fail-closed secret, forced password change for seeded accounts — see the deployment
+notes at the end of [docs/user-guide.md](docs/user-guide.md)); what still separates this
+from a real production deployment is outlined in
 [docs/production-roadmap.md](docs/production-roadmap.md).
