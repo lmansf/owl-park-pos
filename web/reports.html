@@ -124,6 +124,12 @@
     </div>`;
   }
 
+  // Latest-wins across all triggers (Run button, tab clicks, group-by changes):
+  // each run bumps the sequence, stale responses are discarded, and the Run
+  // button's busy state never blocks a run started from another control.
+  const runBtn = document.getElementById('run');
+  const runLabel = runBtn.textContent;
+  let runSeq = 0;
   async function run() {
     for (const b of tabsEl.querySelectorAll('button')) {
       b.classList.toggle('active', b.dataset.tab === tab);
@@ -136,18 +142,25 @@
     }
     csvLink.href = url('csv');
     out.innerHTML = '<p class="op-muted">Loading…</p>';
+    const seq = ++runSeq;
+    runBtn.disabled = true;
+    runBtn.textContent = 'Running…';
     let report;
     try {
-      // busy = no double-fire while a slow range crunches
-      report = await op.busy(document.getElementById('run'), () => op.api(url()), 'Running…');
-      if (!report) return;
-    } catch { out.innerHTML = '<p class="op-muted">Report failed — adjust the range and run again.</p>'; return; }
+      report = await op.api(url());
+    } catch {
+      if (seq === runSeq) out.innerHTML = '<p class="op-muted">Report failed — adjust the range and run again.</p>';
+      return;
+    } finally {
+      if (seq === runSeq) { runBtn.disabled = false; runBtn.textContent = runLabel; }
+    }
+    if (seq !== runSeq) return;
     out.innerHTML =
       `<p class="op-muted">${op.esc(report.range.from)} → ${op.esc(report.range.to)}</p>` +
       report.sections.map(renderSection).join('');
   }
 
-  document.getElementById('run').addEventListener('click', run);
+  runBtn.addEventListener('click', run);
   groupbyEl.addEventListener('change', run);
   await run();
 })();

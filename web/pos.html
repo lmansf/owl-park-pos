@@ -1240,7 +1240,8 @@
   document.addEventListener('keydown', (e) => {
     if (document.querySelector('dialog[open]')) return;
     if ($('view-sell').hidden) return;
-    const typing = /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(e.target.tagName);
+    const typing = /^(INPUT|SELECT|TEXTAREA|BUTTON|A)$/.test(e.target.tagName) ||
+      Boolean(e.target.closest && e.target.closest('a, button'));
     if (e.key === 'F2' || (e.key === 'Enter' && !typing)) {
       if ($('btn-tender').disabled) return;
       e.preventDefault();

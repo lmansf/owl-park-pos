@@ -51,7 +51,11 @@
 <script src="/shell.js"></script>
 <script>
   const params = new URLSearchParams(location.search);
-  const nextUrl = () => params.get('next') || null;
+  // only same-origin relative paths: a single leading "/" (not "//host" or "/\host")
+  const nextUrl = () => {
+    const next = params.get('next');
+    return next && /^\/(?![/\\])/.test(next) ? next : null;
+  };
   let sessionUser = null;
 
   // health drives the demo-credentials hint: only demo mode advertises passwords
