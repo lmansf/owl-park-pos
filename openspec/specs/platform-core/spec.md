@@ -190,7 +190,10 @@ The server SHALL run in one of two modes resolved at `createApp` time from
 change, demo credential hints shown) and `production`. Seeding SHALL resolve its mode
 from the same environment `createApp` was given. In production mode the server SHALL
 fail closed before listening unless `OWLPOS_SECRET` decodes to at least 32 bytes, SHALL
-set `Secure` cookies, and SHALL hide demo credential hints. `VERCEL` SHALL never imply
+set `Secure` cookies, and SHALL hide demo credential hints. A production start SHALL
+also refuse when the database file does not exist (a typo'd `OWLPOS_DB` or unmounted
+volume must never silently seed a fresh demo park); `OWLPOS_INIT_DB=1` is the explicit
+first-boot opt-in to create one. Demo mode always creates. `VERCEL` SHALL never imply
 production. `GET /api/health` SHALL report the active `mode`.
 
 A production seed SHALL never create a usable well-known credential: the first admin
@@ -281,17 +284,40 @@ the server stopped: it verifies `integrity_check`, refuses snapshots whose
 `schema_migrations` contain names unknown to the checkout (older snapshots are fine —
 pending migrations apply on next start), refuses a snapshot that is the target itself,
 preserves the current database and its WAL/SHM sidecars as a `-pre-restore-` copy, and
-appends a `backups.restore` audit row to the restored database. While `-wal`/`-shm`
-sidecars exist beside the target (the server is still running, or crashed without a
-clean close) it SHALL refuse to run; only `--force` overrides that, with a loud warning.
-The restore SHALL be failure-atomic: the snapshot is staged beside the target first,
-and any failure rolls the renames back and exits non-zero with the original database
-in place.
+appends a `backups.restore` audit row to the restored database. It SHALL refuse to run
+while another process still holds the target database open, determined by probing
+SQLite for exclusive access (SQLITE_BUSY) — never by the mere presence of `-wal`/`-shm`
+sidecars, which a crashed process leaves behind; only `--force` overrides the refusal,
+with a loud warning. Both the restored database and the preserved pre-restore copy are
+left at mode 0600. The restore SHALL be failure-atomic: the snapshot is staged beside
+the target first, and any failure rolls the renames back and exits non-zero with the
+original database in place.
 
 #### Scenario: Newer snapshot refused
 - **WHEN** the tool is pointed at a snapshot containing migration `999_future.sql` that
   the checkout does not have
 - **THEN** it exits non-zero and the target database file is unchanged.
+
+#### Scenario: Crash leftovers do not block a restore
+- **WHEN** the server was killed uncleanly (sidecars remain) but nothing has the
+  database open
+- **THEN** the restore proceeds without `--force`; with the server still running it
+  refuses.
+
+### Requirement: Clean shutdown
+
+On `SIGINT`/`SIGTERM` the server SHALL stop accepting requests, let in-flight requests
+finish (bounded by a ~5 s grace after which remaining connections are cut), checkpoint
+the write-ahead log, and close the database cleanly — leaving a single self-contained
+database file with no `-wal`/`-shm` sidecars, so an ordinary stop is immediately
+backup- and restore-ready. The database connection SHALL carry a busy timeout (5 s) so
+concurrent operator tooling and live requests wait out brief write-lock collisions
+instead of failing with `SQLITE_BUSY`.
+
+#### Scenario: Ctrl-C leaves one file
+- **WHEN** the running server receives SIGTERM with no requests in flight
+- **THEN** the process exits 0 and only the database file remains — no `-wal`/`-shm` —
+  and `tools/restore.js` runs without `--force`.
 
 ### Requirement: Operational health fields
 

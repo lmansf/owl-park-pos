@@ -4,8 +4,11 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { spawn } = require('node:child_process');
+const { DatabaseSync } = require('node:sqlite');
 
-const { createApp } = require('../server/main');
+const { createApp, shutdown } = require('../server/main');
+const { openDb, closeDb } = require('../server/core/db');
 
 function tempDb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'op-test-'));
@@ -25,6 +28,7 @@ const BOOTSTRAP = 'operator-bootstrap-pass';
 const PROD_ENV = {
   OWLPOS_MODE: 'production', OWLPOS_SECRET: 'ab'.repeat(32),
   OWLPOS_BOOTSTRAP_ADMIN_PASSWORD: BOOTSTRAP,
+  OWLPOS_INIT_DB: '1', // a scratch path is always a deliberate first boot here
 };
 
 // minimal cookie-carrying client
@@ -208,7 +212,7 @@ test('core: production mode — fail-closed secret, forced password change, cook
   // bootstrap admin password fails closed instead of seeding demo credentials
   assert.throws(
     () => createApp(tempDb(), {
-      env: { OWLPOS_MODE: 'production', OWLPOS_SECRET: 'ab'.repeat(32) },
+      env: { OWLPOS_MODE: 'production', OWLPOS_SECRET: 'ab'.repeat(32), OWLPOS_INIT_DB: '1' },
     }),
     /OWLPOS_BOOTSTRAP_ADMIN_PASSWORD/
   );
@@ -291,6 +295,95 @@ test('core: seed is idempotent across restarts', async () => {
   assert.equal(users1, 4);
   assert.equal(users2, 4);
   assert.equal(products, 7);
+});
+
+test('core: shutdown closes the database cleanly — nothing stranded in the WAL', async () => {
+  const dbPath = tempDb();
+  const { server, db } = createApp(dbPath);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await fetch(`http://127.0.0.1:${server.address().port}/api/health`);
+  assert.ok(fs.existsSync(dbPath + '-wal'), 'a live server holds a WAL open');
+
+  await shutdown(server, db);
+
+  // SQLite removes the sidecars only on the last CLEAN close. Their absence is
+  // what lets tools/restore.js tell a stopped server from a running one.
+  assert.ok(!fs.existsSync(dbPath + '-wal'), 'no -wal left behind');
+  assert.ok(!fs.existsSync(dbPath + '-shm'), 'no -shm left behind');
+  const reopened = new DatabaseSync(dbPath, { readOnly: true });
+  assert.equal(reopened.prepare('SELECT COUNT(*) AS n FROM users').get().n, 4,
+    'the whole database is in the file, not in a sidecar');
+  reopened.close();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
+
+test('core: the live database is as private as its backups', () => {
+  const dbPath = tempDb();
+  const db = openDb(dbPath);
+  db.exec('CREATE TABLE secrets (x)'); // a write materializes the sidecars
+  // scrypt hashes, member PII and plaintext gate codes live here; every copy of
+  // them (backups.js, restore.js) is 0600 and the original must match.
+  for (const ext of ['', '-wal', '-shm']) {
+    assert.equal(fs.statSync(dbPath + ext).mode & 0o777, 0o600, `${ext || 'db'} is private`);
+  }
+  closeDb(db);
+  // a database left lax by an older build is tightened on the next open
+  fs.chmodSync(dbPath, 0o644);
+  const again = openDb(dbPath);
+  again.exec('INSERT INTO secrets VALUES (1)');
+  assert.equal(fs.statSync(dbPath).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(dbPath + '-wal').mode & 0o777, 0o600, 'sidecars inherit the tight mode');
+  closeDb(again);
+});
+
+test('core: a write waits out a cross-process lock instead of failing the sale', async () => {
+  // The venue runs tools/users.js against the live database; WAL allows one
+  // writer, so without a busy timeout either side dies with "database is
+  // locked" — a 500 mid-tender, or a half-applied account change.
+  const dbPath = tempDb();
+  const db = openDb(dbPath);
+  db.exec('CREATE TABLE lock_probe (x INTEGER)');
+  const hold = `
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(process.argv[1]);
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('BEGIN IMMEDIATE');
+    db.prepare('INSERT INTO lock_probe VALUES (1)').run();
+    console.log('locked');
+    setTimeout(() => { db.exec('COMMIT'); db.close(); }, 600);
+  `;
+  const holder = spawn(process.execPath, ['-e', hold, dbPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    await new Promise((resolve, reject) => {
+      holder.stdout.on('data', (chunk) => { if (String(chunk).includes('locked')) resolve(); });
+      holder.on('exit', () => reject(new Error('lock holder exited early')));
+    });
+    db.prepare('INSERT INTO lock_probe VALUES (2)').run(); // blocks, then commits
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM lock_probe').get().n, 2);
+  } finally {
+    holder.kill('SIGKILL');
+    closeDb(db);
+  }
+});
+
+test('core: production refuses to invent a database that should already exist', () => {
+  // Unmounted data volume / typo'd OWLPOS_DB: seeding a fresh demo park here
+  // means a full day of real sales landing on an orphan file.
+  const missing = path.join(path.dirname(tempDb()), 'not-mounted', 'owlpark-pos.db');
+  assert.throws(
+    () => createApp(missing, { env: { ...PROD_ENV, OWLPOS_INIT_DB: '' } }),
+    /database not found/
+  );
+  assert.ok(!fs.existsSync(path.dirname(missing)), 'no directory tree invented');
+
+  // …but the deliberate first boot still works, and demo mode is untouched
+  const first = createApp(missing, { env: PROD_ENV });
+  assert.equal(first.db.prepare('SELECT COUNT(*) AS n FROM users').get().n, 4);
+  closeDb(first.db);
+  const reopen = createApp(missing, { env: { ...PROD_ENV, OWLPOS_INIT_DB: '' } });
+  closeDb(reopen.db);
+  const demo = createApp(path.join(path.dirname(tempDb()), 'demo', 'owlpark-pos.db'));
+  closeDb(demo.db);
 });
 
 test('barcode: encodes ticket codes, rejects bad chars', () => {

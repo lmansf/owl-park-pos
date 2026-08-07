@@ -2,7 +2,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const { openDb, migrate } = require('./core/db');
+const { openDb, closeDb, migrate } = require('./core/db');
 const { Router, ApiError } = require('./core/http');
 const auth = require('./core/auth');
 const { seed } = require('./core/seed');
@@ -18,13 +18,20 @@ const PW_CHANGE_ALLOWED = new Set([
 ]);
 
 const DISK_LOW_BYTES = 500 * 1024 * 1024; // warn admins below 500 MB free
+const SHUTDOWN_GRACE_MS = 5000; // in-flight requests finish; keep-alives get cut
 
 function createApp(dbPath = DB_PATH, opts = {}) {
   const env = opts.env || process.env;
   // Fail-closed: in production mode this throws (no OWLPOS_SECRET, too short)
   // before anything listens. Demo mode keeps the per-process random fallback.
   const config = auth.resolveConfig(env);
-  const db = openDb(dbPath);
+  // Fail-closed #2: in production the database is the system of record, so a
+  // path that is not there is a misconfiguration (typo'd OWLPOS_DB, unmounted
+  // volume) — never an invitation to seed a fresh park and look healthy while
+  // staff sell against an orphan file. OWLPOS_INIT_DB=1 is the deliberate
+  // first-boot opt-in; demo mode (and the ephemeral Vercel demo) still create.
+  const initDb = /^(1|true|yes)$/i.test(String(env.OWLPOS_INIT_DB || ''));
+  const db = openDb(dbPath, { mustExist: config.mode === 'production' && !initDb });
   migrate(db, path.join(__dirname, 'migrations'));
   if (seed(db, env)) log('info', 'seed.created');
 
@@ -85,11 +92,45 @@ function createApp(dbPath = DB_PATH, opts = {}) {
   return { db, router, server, ctx };
 }
 
-if (require.main === module) {
-  const { server } = createApp();
-  server.listen(PORT, '127.0.0.1', () => {
-    log('info', 'server.listen', { port: PORT, url: `http://localhost:${PORT}` });
+// Stop serving, let in-flight requests land, then close the database CLEANLY —
+// that last close is what makes SQLite checkpoint and delete the -wal/-shm
+// sidecars. Without it every ordinary stop leaves a database that still looks
+// open, and tools/restore.js (which probes exactly that) can never run.
+function shutdown(server, db, grace = SHUTDOWN_GRACE_MS) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      closeDb(db);
+      resolve();
+    };
+    // A parked keep-alive from an idle POS terminal must not hold the venue's
+    // database hostage past the grace window.
+    const timer = setTimeout(() => {
+      server.closeAllConnections?.();
+      finish();
+    }, grace);
+    server.close(finish);
+    server.closeIdleConnections?.();
   });
 }
 
-module.exports = { createApp };
+if (require.main === module) {
+  const { server, db } = createApp();
+  server.listen(PORT, '127.0.0.1', () => {
+    log('info', 'server.listen', { port: PORT, url: `http://localhost:${PORT}` });
+  });
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      log('info', 'server.shutdown', { signal });
+      shutdown(server, db).then(() => {
+        log('info', 'server.stopped');
+        process.exit(0);
+      });
+    });
+  }
+}
+
+module.exports = { createApp, shutdown };

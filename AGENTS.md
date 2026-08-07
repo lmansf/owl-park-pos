@@ -26,6 +26,8 @@ forced password change, `tools/users.js` account admin; spec:
   `admissions.checkCode` (the only admit/deny path; always writes an `admits` row).
 - Membership on order lines is structured: `order_lines.member_id` (renewal target,
   stamped at finalize) and `member_intent` (server-written JSON {name, email} for a new
-  member) — pos.js writes them, finalizeOrder consumes them. Line descriptions are
-  display-only; never parse member info out of them.
+  member) — pos.js writes them, finalizeOrder consumes them. finalizeOrder also records
+  every member a line actually posts in `order_line_members` (one row per unit); refunds
+  and the order/guest views consume that, never just the single stamped member_id. Line
+  descriptions are display-only; never parse member info out of them.
 - Day boundaries ("today", report bucketing) are server-local time throughout.

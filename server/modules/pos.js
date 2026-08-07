@@ -7,9 +7,12 @@
 // (finalize, refund and exchange all inside one tx each).
 const { ApiError } = require('../core/http');
 const { tx, now } = require('../core/db');
-const { audit, randomCode, verifyManagerCredential, createRateLimiter } = require('../core/auth');
+const {
+  audit, randomCode, verifyManagerCredential, clientIp, resolveConfig,
+} = require('../core/auth');
 
 const SELL = ['cashier', 'manager', 'admin'];
+const MANAGE = ['manager', 'admin'];
 const DAY_MS = (24 * 3600 * 1000);
 const REF_MAX = 64; // refs land in DB rows and receipts — cap attacker-length input
 const MAX_REFUND_LINES = 200; // sanity cap on a refund selection body
@@ -110,6 +113,20 @@ function memberIntent(raw) {
   return null;
 }
 
+// Sell a NEW membership: always a fresh member row, even when an active member
+// already carries this email. membership.createOrRenewMember has no "always create"
+// switch — it renews on an email match — and hiding the email from it is the only
+// way to reach its create branch, so the email is stamped straight back onto the row
+// it just minted (same transaction, same value the module would have inserted).
+// A `create_new` option on createOrRenewMember would retire this two-step.
+function createFreshMember(db, ctx, { program_id, name, email }) {
+  const member = ctx.modules.membership.createOrRenewMember(db, { program_id, name, email: '' });
+  const address = String(email || '');
+  if (!address) return member;
+  db.prepare('UPDATE members SET email = ? WHERE id = ?').run(address, member.id);
+  return { ...member, email: address };
+}
+
 // Full order view: order row + lines + payments + tickets.
 function getOrderDetail(db, id) {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
@@ -124,6 +141,26 @@ function getOrderDetail(db, id) {
        WHERE ol.order_id = ? ORDER BY ol.id`
     )
     .all(id);
+  // every member each membership line posted, not just the last one stamped
+  const memberRows = db
+    .prepare(
+      `SELECT olm.order_line_id, olm.member_id, olm.action,
+              m.member_no, m.name, m.status, m.expires_at
+       FROM order_line_members olm
+       JOIN order_lines ol ON ol.id = olm.order_line_id
+       JOIN members m ON m.id = olm.member_id
+       WHERE ol.order_id = ? ORDER BY olm.id`
+    )
+    .all(id);
+  for (const l of order.lines) {
+    const posted = memberRows.filter((r) => r.order_line_id === l.id);
+    if (posted.length) {
+      l.members = posted.map((r) => ({
+        member_id: r.member_id, action: r.action, member_no: r.member_no,
+        name: r.name, status: r.status, expires_at: r.expires_at,
+      }));
+    }
+  }
   order.payments = db
     .prepare('SELECT * FROM payments WHERE order_id = ? ORDER BY id')
     .all(id);
@@ -368,9 +405,19 @@ function finalizeOrder(db, ctx, orderId, payments, actorId) {
     }
 
     // --- tickets: one per qty on kind='ticket' lines -------------------------
+    // Validity runs from the purchase, but a timed-entry line must always cover its
+    // OWN session: a season schedule sold further out than validity_days would
+    // otherwise issue paid, barcoded tickets that are already expired on the day of
+    // the show (admissions.checkTicket denies on valid_to before it ever looks at
+    // the session window). Same widening the exchange path does — neither a sale nor
+    // an exchange may ever produce an instantly-expired ticket.
     for (const l of lines) {
       if (l.kind !== 'ticket') continue;
-      const validTo = new Date(Date.parse(at) + l.validity_days * DAY_MS).toISOString();
+      let validTo = new Date(Date.parse(at) + l.validity_days * DAY_MS).toISOString();
+      if (l.event_session_id != null) {
+        const session = ctx.modules.events.getSession(db, l.event_session_id);
+        if (session && Date.parse(session.ends_at) > Date.parse(validTo)) validTo = session.ends_at;
+      }
       for (let i = 0; i < l.qty; i++) {
         issueTicket(db, {
           order_line_id: l.id, product_id: l.product_id,
@@ -382,20 +429,56 @@ function finalizeOrder(db, ctx, orderId, payments, actorId) {
 
     // --- memberships: create or renew via the membership module --------------
     // Structured columns only; the line description is display text, never parsed.
+    // ONE MEMBERSHIP SOLD IS ONE MEMBERSHIP DELIVERED. createOrRenewMember renews any
+    // active member matching (email, program) when no member_id is given, so a second
+    // unit — or a second person handing over the same household email — used to
+    // collapse into the member the first unit had just created: two payments, one
+    // pass, double duration. A line that NAMES its member (member_intent: the POS new-
+    // member prompt and the gift path) therefore always creates its own member; only an
+    // explicit member_id renews. A bare line (no member info, buyer's own email) keeps
+    // the legacy renew-by-email behavior, but at most once per (program, email) per
+    // order so repeat units still get their own membership.
     const members = [];
     const stampMember = db.prepare('UPDATE order_lines SET member_id = ? WHERE id = ?');
+    // One order_line_members row per unit posted: member_id can stamp only the LAST
+    // member, so refunds and the order/guest views consume this set instead.
+    const insLineMember = db.prepare(
+      'INSERT INTO order_line_members (order_line_id, member_id, action) VALUES (?, ?, ?)'
+    );
+    const activeByEmail = db.prepare(
+      `SELECT id FROM members
+       WHERE status = 'active' AND lower(email) = lower(?) AND program_id = ?
+       ORDER BY id LIMIT 1`
+    );
+    const renewedByEmail = new Set();
     for (const l of lines) {
       if (l.kind !== 'membership') continue;
       const intent = memberIntent(l.member_intent);
+      const name = (intent && intent.name) || order.customer_name;
+      const email = intent ? intent.email : order.customer_email;
+      const emailKey = `${l.membership_program_id}|${String(email || '').toLowerCase()}`;
       let member = null;
       for (let i = 0; i < l.qty; i++) {
-        member = ctx.modules.membership.createOrRenewMember(db, {
-          program_id: l.membership_program_id,
-          member_id: l.member_id || undefined,
-          name: (intent && intent.name) || order.customer_name,
-          email: intent ? intent.email : order.customer_email,
-        });
+        const renewByEmail = !l.member_id && !intent && email && !renewedByEmail.has(emailKey);
+        if (renewByEmail) renewedByEmail.add(emailKey);
+        // same lookup createOrRenewMember does, so 'renewed' vs 'minted' is recorded
+        // exactly as the module is about to act (renew-by-email with no active match
+        // falls through to a create)
+        const renews = l.member_id
+          ? true
+          : renewByEmail
+            ? Boolean(activeByEmail.get(String(email), l.membership_program_id))
+            : false;
+        member = l.member_id || renewByEmail
+          ? ctx.modules.membership.createOrRenewMember(db, {
+            program_id: l.membership_program_id,
+            member_id: l.member_id || undefined,
+            name,
+            email,
+          })
+          : createFreshMember(db, ctx, { program_id: l.membership_program_id, name, email });
         members.push(member);
+        insLineMember.run(l.id, member.id, renews ? 'renewed' : 'minted');
       }
       // stamp the posted member so the line stays joinable (reports, guest view)
       if (member && member.id !== l.member_id) stampMember.run(member.id, l.id);
@@ -589,6 +672,48 @@ function refundOrder(db, ctx, orderId, userId, approverId, selection) {
       }
     }
 
+    // --- memberships: a refunded membership must stop admitting --------------
+    // Money back and a live pass is a free year at the gate (admissions.checkMember
+    // only looks at status/expiry, and nothing else in the app reverses a sale).
+    // finalize recorded EVERY member the line posted in order_line_members (one row
+    // per unit), so refunding q units reverses exactly q of them, most recently
+    // posted first — deterministic, never just whichever member happened to be
+    // stamped last. A 'minted' row suspends its member outright (a manager can
+    // reinstate from /members.html if the refund was a mistake); a 'renewed' row
+    // gives back one program duration, keeping the time still paid for. Rows earlier
+    // refunds already reversed — the first refunded_qty in that same reverse order —
+    // are skipped.
+    const revokedMembers = [];
+    const postedMembers = db.prepare(
+      `SELECT member_id, action FROM order_line_members
+       WHERE order_line_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`
+    );
+    for (const p of picks) {
+      const { line, q } = p;
+      if (line.kind !== 'membership') continue;
+      for (const posted of postedMembers.all(line.id, q, line.refunded_qty)) {
+        const member = db.prepare('SELECT * FROM members WHERE id = ?').get(posted.member_id);
+        if (!member) continue;
+        if (posted.action === 'minted') {
+          db.prepare("UPDATE members SET status = 'suspended' WHERE id = ?").run(member.id);
+          revokedMembers.push({ id: member.id, member_no: member.member_no, action: 'suspended' });
+          continue;
+        }
+        const program = db
+          .prepare('SELECT duration_days FROM membership_programs WHERE id = ?')
+          .get(member.program_id);
+        if (!program) continue;
+        const expiresAt = new Date(
+          Date.parse(member.expires_at) - program.duration_days * DAY_MS
+        ).toISOString();
+        db.prepare('UPDATE members SET expires_at = ? WHERE id = ?').run(expiresAt, member.id);
+        revokedMembers.push({
+          id: member.id, member_no: member.member_no,
+          action: 'expiry_rolled_back', expires_at: expiresAt,
+        });
+      }
+    }
+
     // --- refund event + per-line progress ------------------------------------
     const refundId = Number(
       db.prepare(
@@ -656,10 +781,12 @@ function refundOrder(db, ctx, orderId, userId, approverId, selection) {
       refund_cents: refundTotal, full: !explicit,
       lines: picks.map((p) => ({ order_line_id: p.line.id, qty: p.q })),
       voided_tickets: voided, approved_by: approverId ?? null,
+      ...(revokedMembers.length ? { members: revokedMembers } : {}),
     });
     return {
       order: getOrderDetail(db, orderId),
       voided_tickets: voided,
+      revoked_members: revokedMembers,
       refund: { id: refundId, total_cents: refundTotal },
     };
   });
@@ -736,12 +863,62 @@ function exchangeTicket(db, ctx, ticketId, targetSessionId, userId, approverId) 
   });
 }
 
+// Fixed-window FAILURE throttle for the approver re-auth path. Unknown approver
+// usernames never lock an account but still cost a full scrypt, so approver attempts
+// have to be bounded — but only the FAILURES may be. A plain createRateLimiter
+// increments on every call, so SUCCESSFUL approvals ate the same budget and the whole
+// venue was capped at 20 legitimate voids/refunds/exchanges a minute: one manager
+// working the refund queue of a cancelled 40-seat session ran out at #21 with an
+// error that reads like a credential problem. Same window and per-IP bucket as
+// before (now resolved through OWLPOS_TRUST_PROXY, so terminals behind the
+// documented reverse proxy get their own bucket instead of sharing the proxy's).
+// Pruned inline — no setInterval, which is serverless-hostile and keeps test
+// processes alive — and hard-capped so forged keys cannot grow the map.
+const APPROVER_FAIL_MAX = 20;        // FAILED approvals per client IP per window
+const APPROVER_WINDOW_MS = 60_000;
+const APPROVER_MAX_TRACKED = 10_000;
+
+function createFailureThrottle(max = APPROVER_FAIL_MAX) {
+  const buckets = new Map(); // client ip -> { count, windowStart }
+  const live = (key, t) => {
+    const b = buckets.get(key);
+    if (!b) return null;
+    if (t - b.windowStart >= APPROVER_WINDOW_MS) { buckets.delete(key); return null; }
+    return b;
+  };
+  return {
+    // runs before any scrypt work: a bucket already at its limit is refused outright
+    check(res, key) {
+      const t = Date.now();
+      for (const [k, v] of buckets) {
+        if (t - v.windowStart >= APPROVER_WINDOW_MS) buckets.delete(k);
+      }
+      const b = live(key, t);
+      if (b && b.count >= max) {
+        res.setHeader('retry-after', Math.ceil((b.windowStart + APPROVER_WINDOW_MS - t) / 1000));
+        throw new ApiError(429, 'too_many_attempts', 'Too many attempts — try again shortly');
+      }
+    },
+    fail(key) {
+      const t = Date.now();
+      if (!buckets.has(key) && buckets.size >= APPROVER_MAX_TRACKED) {
+        buckets.delete(buckets.keys().next().value); // evict the oldest bucket
+      }
+      const b = live(key, t) || { count: 0, windowStart: t };
+      b.count++;
+      buckets.set(key, b);
+    },
+  };
+}
+
 function mount(router, ctx) {
   const db = ctx.db;
-  // Per-IP throttle for the approver re-auth path: unknown approver usernames
-  // never lock an account but still cost a full scrypt, so without this an
-  // authenticated seller could burn CPU with unbounded void/refund attempts.
-  const approverRateLimit = createRateLimiter();
+  const approverFailures = createFailureThrottle();
+  // Honor OWLPOS_TRUST_PROXY from the INJECTED env (ctx.env), like every other
+  // config read: behind the documented single reverse proxy the peer address is the
+  // proxy's, so both the throttle buckets and the audit rows would otherwise be
+  // stamped 127.0.0.1 for every terminal in the venue.
+  const { trustProxy } = resolveConfig(ctx.env || process.env);
   // The production password-change fence lives in the router guard (main.js) and
   // only inspects the SESSION holder. Manager re-auth is a second, separate
   // credential path, so an approver who still owes a rotation would otherwise
@@ -753,11 +930,22 @@ function mount(router, ctx) {
   // failure mode collapses into the same generic 403 — this must not become an
   // oracle for which manager accounts are fenced.
   function approveWith(req, res) {
-    approverRateLimit(req, res);
-    const approver = verifyManagerCredential(db, req.body?.approver, req.socket?.remoteAddress);
+    const ip = clientIp(req, trustProxy);
+    approverFailures.check(res, ip);
+    let approver;
+    try {
+      // the resolved client IP, not the raw peer: the auth.login_failed /
+      // auth.login_locked rows this writes are how a manager finds WHICH terminal
+      // was guessing at their password
+      approver = verifyManagerCredential(db, req.body?.approver, ip);
+    } catch (err) {
+      approverFailures.fail(ip);
+      throw err;
+    }
     if (production) {
       const row = db.prepare('SELECT must_change_password FROM users WHERE id = ?').get(approver.id);
       if (row?.must_change_password) {
+        approverFailures.fail(ip);
         throw new ApiError(403, 'approval_required', 'Manager approval required');
       }
     }
@@ -773,6 +961,10 @@ function mount(router, ctx) {
   // would recover the amount, since a single-tender order's net equals
   // total_cents. The finalize response still shows the sale being rung, and a
   // closed session (Z-report, manager review) is fully readable again.
+  // A withheld row keeps two money-free facts so a receipt can stay HONEST rather
+  // than render the nulls as "$0.00": `withheld` (print "hidden until drawer close",
+  // never a fabricated amount) and `refund` (a negative row must never be printed as
+  // a payment). Neither discloses cash.
   function withholdOwnOpenDrawerCash(order, userId) {
     const open = ctx.modules.drawer.openSessionFor(db, userId ?? null);
     if (!open) return order;
@@ -783,6 +975,7 @@ function mount(router, ctx) {
       return {
         ...p, method: 'withheld', amount_cents: null, change_cents: null,
         ref: null, drawer_session_id: null, withheld: true,
+        refund: p.amount_cents < 0,
       };
     });
     if (withheld) order.payments_withheld = true;
@@ -856,6 +1049,30 @@ function mount(router, ctx) {
       return { order: getOrderDetail(db, order.id) };
     });
   });
+
+  // Abandon an OPEN order the seller walked away from (tender dialog cancelled,
+  // capacity/drawer error, cart cleared). Nothing is paid, no ticket exists and no
+  // capacity is held, so this needs no manager re-auth: a seller may drop their OWN
+  // open order, a manager/admin any of them. Without it every aborted tender left a
+  // permanent null-confirmation 'open' row at the head of the order search that only
+  // a manager could clear, one typed password at a time.
+  router.post('/api/pos/orders/:id/abandon', SELL, (req) =>
+    tx(db, () => {
+      const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id));
+      if (!order) throw new ApiError(404, 'not_found', `No order ${req.params.id}`);
+      if (order.cashier_id !== req.user.id && !MANAGE.includes(req.user.role)) {
+        throw new ApiError(403, 'forbidden', 'Only the order’s cashier or a manager can abandon it');
+      }
+      if (order.status !== 'open') {
+        throw new ApiError(
+          409, 'not_voidable', `Only open orders can be abandoned (order is ${order.status})`
+        );
+      }
+      db.prepare("UPDATE orders SET status = 'void' WHERE id = ?").run(order.id);
+      audit(db, req.user.id, 'pos.order.abandon', { order_id: order.id });
+      return { order: getOrderDetail(db, order.id) };
+    })
+  );
 
   // Refund a paid/partially-refunded order — any seller, with the same manager
   // re-auth. Body {lines: [{order_line_id, qty}]} refunds a selection; an

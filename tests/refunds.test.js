@@ -770,3 +770,243 @@ test('reporting: partial refunds and exchanges keep reports and the journal hone
     assert.equal(ev[0].total_cents, o2.total_cents);
   });
 });
+
+test('pos: refunding a membership takes the membership back', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const cashier = await login(base, 'cashier');
+  const mgr = await login(base, 'manager');
+  const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
+  const memExp = sell.find((p) => p.sku === 'MEM-EXP');
+
+  await t.test('a refunded new membership stops admitting at the gate', async () => {
+    const o = await paidOrder(
+      cashier,
+      [{ product_id: memExp.id, qty: 1, member: { name: 'Wanda Refund', email: 'wanda@example.com' } }],
+      [{ method: 'card_sim', amount_cents: 9900 }]
+    );
+    const member = db.prepare("SELECT * FROM members WHERE lower(email) = 'wanda@example.com'").get();
+    assert.equal(member.status, 'active');
+    // it admits while it is paid for
+    const before = await mgr('POST', '/api/admissions/scan', { code: member.pass_code });
+    assert.equal(before.data.result, 'ok');
+
+    const r = await mgr('POST', `/api/pos/orders/${o.id}/refund`, { approver: APPROVER });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.order.status, 'refunded');
+    assert.deepEqual(
+      r.data.revoked_members.map((m) => [m.member_no, m.action]),
+      [[member.member_no, 'suspended']]
+    );
+    const after = db.prepare('SELECT * FROM members WHERE id = ?').get(member.id);
+    assert.equal(after.status, 'suspended', 'money back = membership back');
+    const scan = await mgr('POST', '/api/admissions/scan', { code: member.pass_code });
+    assert.equal(scan.data.result, 'denied', 'a refunded pass must not buy a free year');
+    // the reversal shows on the audit row a manager reads
+    const detail = JSON.parse(
+      db.prepare("SELECT detail FROM audit_log WHERE action = 'pos.order.refund' ORDER BY id DESC LIMIT 1")
+        .get().detail
+    );
+    assert.equal(detail.members[0].member_no, member.member_no);
+  });
+
+  await t.test('a refunded renewal gives back only the year that was refunded', async () => {
+    await paidOrder(
+      cashier,
+      [{ product_id: memExp.id, qty: 1, member: { name: 'Rene Newal', email: 'rene@example.com' } }],
+      [{ method: 'card_sim', amount_cents: 9900 }]
+    );
+    const member = db.prepare("SELECT * FROM members WHERE lower(email) = 'rene@example.com'").get();
+    const paidThrough = Date.parse(member.expires_at);
+
+    const renewal = await paidOrder(
+      cashier,
+      [{ product_id: memExp.id, qty: 1, member: { member_id: member.id } }],
+      [{ method: 'card_sim', amount_cents: 9900 }]
+    );
+    const extended = db.prepare('SELECT * FROM members WHERE id = ?').get(member.id);
+    assert.ok(Date.parse(extended.expires_at) > paidThrough);
+
+    const r = await mgr('POST', `/api/pos/orders/${renewal.id}/refund`, { approver: APPROVER });
+    assert.equal(r.status, 200);
+    const back = db.prepare('SELECT * FROM members WHERE id = ?').get(member.id);
+    assert.equal(back.status, 'active', 'the year they still paid for survives');
+    assert.equal(Date.parse(back.expires_at), paidThrough, 'only the refunded year comes off');
+    const scan = await mgr('POST', '/api/admissions/scan', { code: member.pass_code });
+    assert.equal(scan.data.result, 'ok');
+  });
+});
+
+test('pos: multi-unit membership lines refund every pass they sold', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const cashier = await login(base, 'cashier');
+  const mgr = await login(base, 'manager');
+  const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
+  const memExp = sell.find((p) => p.sku === 'MEM-EXP');
+  const memberByEmail = (email) =>
+    db.prepare('SELECT * FROM members WHERE lower(email) = lower(?) ORDER BY id').all(email);
+  const scan = async (code) =>
+    (await mgr('POST', '/api/admissions/scan', { code })).data.result;
+
+  await t.test('qty-2 gift line: partial refund suspends the newest pass, full refund both', async () => {
+    const o = await paidOrder(
+      cashier,
+      [{ product_id: memExp.id, qty: 2, member: { name: 'Gift Pair', email: 'pair@example.com' } }],
+      [{ method: 'card_sim', amount_cents: 19800 }]
+    );
+    const [a, b] = memberByEmail('pair@example.com');
+    assert.ok(a && b && a.id !== b.id, 'two units minted two distinct members');
+    // every posted member is recorded, even though member_id stamps only the last
+    assert.deepEqual(
+      db.prepare(
+        'SELECT member_id, action FROM order_line_members WHERE order_line_id = ? ORDER BY id'
+      ).all(o.lines[0].id),
+      [{ member_id: a.id, action: 'minted' }, { member_id: b.id, action: 'minted' }]
+    );
+
+    const r1 = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {
+      approver: APPROVER, lines: [{ order_line_id: o.lines[0].id, qty: 1 }],
+    });
+    assert.equal(r1.status, 200);
+    // deterministic: the most recently minted pass comes back
+    assert.deepEqual(
+      r1.data.revoked_members.map((m) => [m.member_no, m.action]),
+      [[b.member_no, 'suspended']]
+    );
+    assert.equal(db.prepare('SELECT status FROM members WHERE id = ?').get(b.id).status, 'suspended');
+    const aAfter = db.prepare('SELECT * FROM members WHERE id = ?').get(a.id);
+    assert.equal(aAfter.status, 'active');
+    assert.equal(aAfter.expires_at, a.expires_at, 'the surviving pass keeps its full term');
+    assert.equal(await scan(a.pass_code), 'ok');
+    assert.equal(await scan(b.pass_code), 'denied');
+
+    const r2 = await mgr('POST', `/api/pos/orders/${o.id}/refund`, { approver: APPROVER });
+    assert.equal(r2.status, 200);
+    assert.equal(r2.data.order.status, 'refunded');
+    // all the money is back, so NO pass may still admit
+    assert.equal(db.prepare('SELECT status FROM members WHERE id = ?').get(a.id).status, 'suspended');
+    assert.equal(await scan(a.pass_code), 'denied');
+  });
+
+  const webCheckout = async (email, qty) => {
+    const cat = await (await fetch(base + '/api/store/catalog')).json();
+    const webMem = cat.products.find((p) => p.kind === 'membership');
+    const res = await fetch(base + '/api/store/checkout', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        lines: [{ product_id: webMem.id, qty }],
+        customer: { name: 'Merge Buyer', email },
+        card: { number: '4242 4242 4242 4242' },
+      }),
+    });
+    assert.equal(res.status, 200);
+    return (await res.json()).order;
+  };
+
+  await t.test('qty-2 bare web line (cart merge): both passes delivered and both come back', async () => {
+    const o = await webCheckout('merge@example.com', 2);
+    const [a, b] = memberByEmail('merge@example.com');
+    assert.ok(a && b && a.id !== b.id);
+    // delivery surface: a qty-2 purchase shows TWO pass cards, not one
+    assert.equal(o.members.length, 2);
+    assert.deepEqual(o.members.map((m) => m.member_no).sort(), [a.member_no, b.member_no].sort());
+
+    const r1 = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {
+      approver: APPROVER, lines: [{ order_line_id: o.lines[0].id, qty: 1 }],
+    });
+    assert.equal(r1.status, 200);
+    assert.deepEqual(
+      r1.data.revoked_members.map((m) => [m.member_no, m.action]),
+      [[b.member_no, 'suspended']]
+    );
+    const aAfter = db.prepare('SELECT * FROM members WHERE id = ?').get(a.id);
+    assert.equal(aAfter.status, 'active');
+    assert.equal(aAfter.expires_at, a.expires_at);
+
+    const r2 = await mgr('POST', `/api/pos/orders/${o.id}/refund`, { approver: APPROVER });
+    assert.equal(r2.status, 200);
+    assert.equal(db.prepare('SELECT status FROM members WHERE id = ?').get(a.id).status, 'suspended');
+  });
+
+  await t.test('bare qty-2 for a returning buyer: the extra pass first, then the renewal year', async () => {
+    const first = await webCheckout('return@example.com', 1);
+    assert.equal(first.members.length, 1);
+    const [m] = memberByEmail('return@example.com');
+    const paidThrough = m.expires_at;
+
+    const o = await webCheckout('return@example.com', 2); // unit 1 renews m, unit 2 mints a new pass
+    const fresh = memberByEmail('return@example.com').find((x) => x.id !== m.id);
+    assert.ok(fresh, 'the second unit minted its own member');
+    assert.deepEqual(
+      db.prepare(
+        'SELECT member_id, action FROM order_line_members WHERE order_line_id = ? ORDER BY id'
+      ).all(o.lines[0].id),
+      [{ member_id: m.id, action: 'renewed' }, { member_id: fresh.id, action: 'minted' }]
+    );
+
+    // refund 1: the minted extra pass is suspended, the renewal keeps its new year
+    const r1 = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {
+      approver: APPROVER, lines: [{ order_line_id: o.lines[0].id, qty: 1 }],
+    });
+    assert.equal(r1.status, 200);
+    assert.deepEqual(
+      r1.data.revoked_members.map((x) => [x.member_no, x.action]),
+      [[fresh.member_no, 'suspended']]
+    );
+    // refund 2: only the renewed year comes off — the original term survives, active
+    const r2 = await mgr('POST', `/api/pos/orders/${o.id}/refund`, { approver: APPROVER });
+    assert.equal(r2.status, 200);
+    assert.deepEqual(
+      r2.data.revoked_members.map((x) => [x.member_no, x.action]),
+      [[m.member_no, 'expiry_rolled_back']]
+    );
+    const back = db.prepare('SELECT * FROM members WHERE id = ?').get(m.id);
+    assert.equal(back.status, 'active', 'the year they still paid for survives');
+    assert.equal(Date.parse(back.expires_at), Date.parse(paidThrough));
+  });
+});
+
+test('pos: abandoning an open order needs no manager', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const cashier = await login(base, 'cashier');
+  const gate = await login(base, 'gate');
+  const mgr = await login(base, 'manager');
+  const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
+  const adult = sell.find((p) => p.sku === 'ADULT');
+  const open = async () => (
+    await cashier('POST', '/api/pos/orders', { lines: [{ product_id: adult.id, qty: 1 }] })
+  ).data.order;
+
+  await t.test('the seller who opened it can drop it, no approver typed', async () => {
+    const o = await open();
+    const r = await cashier('POST', `/api/pos/orders/${o.id}/abandon`, {});
+    assert.equal(r.status, 200);
+    assert.equal(r.data.order.status, 'void');
+    assert.equal(
+      db.prepare("SELECT COUNT(*) n FROM orders WHERE status = 'open'").get().n, 0,
+      'an abandoned tender leaves no orphaned open order behind'
+    );
+    const a = db
+      .prepare("SELECT * FROM audit_log WHERE action = 'pos.order.abandon' ORDER BY id DESC LIMIT 1")
+      .get();
+    assert.equal(JSON.parse(a.detail).order_id, o.id);
+  });
+
+  await t.test('managers can drop anyone’s; the gate role cannot touch it', async () => {
+    const mine = await open();
+    assert.equal((await gate('POST', `/api/pos/orders/${mine.id}/abandon`, {})).status, 403);
+    assert.equal((await mgr('POST', `/api/pos/orders/${mine.id}/abandon`, {})).status, 200);
+  });
+
+  await t.test('paid orders are never abandonable — refund is the only way back', async () => {
+    assert.equal((await cashier('POST', '/api/drawer/open', { float_cents: 10000 })).status, 200);
+    const paid = await paidOrder(cashier, [{ product_id: adult.id, qty: 1 }]);
+    const r = await cashier('POST', `/api/pos/orders/${paid.id}/abandon`, {});
+    assert.equal(r.status, 409);
+    assert.equal(r.data.error, 'not_voidable');
+    assert.equal(db.prepare('SELECT status FROM orders WHERE id = ?').get(paid.id).status, 'paid');
+  });
+});

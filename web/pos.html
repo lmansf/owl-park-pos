@@ -555,8 +555,24 @@
     $('btn-tender').disabled = !cart.length;
   }
 
+  // An open order exists only between TENDER and finalize. Whenever the cashier
+  // walks away from that dialog — cancel, Esc, a capacity/drawer error, or clearing
+  // the cart — the order is dropped server-side, so an abandoned tender can never
+  // leave a permanent null-confirmation 'open' row sitting at the top of the order
+  // search that only a manager could void, one typed password at a time.
+  let finalizing = false; // Esc landing mid-finalize must not drop the order being paid
+  async function dropCurrentOrder() {
+    if (finalizing) return;
+    const order = currentOrder;
+    currentOrder = null;
+    if (!order || order.status !== 'open') return;
+    try { await op.api(`/api/pos/orders/${order.id}/abandon`, { body: {} }); }
+    catch { /* best effort — a manager can still void it */ }
+  }
+
   $('btn-clear').onclick = () => {
-    cart = []; discount = null; currentOrder = null; flagSessions = false;
+    dropCurrentOrder();
+    cart = []; discount = null; flagSessions = false;
     $('disc-applied').textContent = ''; $('disc-code').value = '';
     $('cust-name').value = ''; $('cust-email').value = '';
     renderCart();
@@ -695,8 +711,13 @@
     tenderTypes = (await op.api('/api/pos/tenders')).tenders;
   }
   $('tender-cancel').onclick = () => dlgTender.close();
+  // Covers the cancel button, Esc and every error path that closes the dialog.
+  // Finalize clears currentOrder before closing, so a completed sale is never
+  // touched here.
+  dlgTender.addEventListener('close', () => { dropCurrentOrder(); });
 
   $('btn-tender').onclick = async () => {
+    await dropCurrentOrder(); // never mint a second order over a live one
     const body = {
       lines: cart.map((l) => ({
         product_id: l.product.id,
@@ -816,11 +837,13 @@
   $('tender-finalize').onclick = async () => {
     // disable-while-pending: a double Enter/click must not fire finalize twice
     // (the server would 409 the second call, but the UI never lets it happen)
+    finalizing = true;
     try {
       const result = await op.busy($('tender-finalize'),
         () => op.api(`/api/pos/orders/${currentOrder.id}/finalize`, { body: { payments: tenders } }),
         'Finalizing…');
       if (!result) return; // guarded re-entry
+      currentOrder = null;  // paid — nothing left to abandon on close
       dlgTender.close();
       $('btn-clear').onclick();
       receiptFrom = 'sell';
@@ -828,6 +851,7 @@
       show('receipt');
       if (result.change_cents > 0) op.toast('Change due: ' + money(result.change_cents), 'ok');
     } catch (err) {
+      finalizing = false; // nothing posted — closing the dialog now disposes of the order
       if (err.code === 'capacity') {
         // the session sold out under us — point at the affected cart lines
         dlgTender.close();
@@ -842,6 +866,10 @@
         openDrawerDialog();
       }
       /* toast already shown by op.api */
+    } finally {
+      // the sale did not post: the order is live again and the next dialog close,
+      // cart clear or TENDER press disposes of it
+      finalizing = false;
     }
   };
 
@@ -904,7 +932,14 @@
       if (!everything) body.lines = picked.map((s) => ({ order_line_id: s.line.id, qty: s.qty }));
       const r = await op.api(`/api/pos/orders/${refundOrderId}/refund`, { body });
       op.toast(`Refunded ${money(r.refund.total_cents)} — ${r.voided_tickets} ticket(s) voided`, 'ok');
-      renderReceipt(r.order, {});
+      // a refunded membership is taken back with the money — say so out loud, the
+      // guest is standing there and the pass stops working immediately
+      for (const m of r.revoked_members || []) {
+        op.toast(m.action === 'suspended'
+          ? `Membership ${m.member_no} suspended`
+          : `Membership ${m.member_no} now expires ${op.fmtDate(m.expires_at)}`, 'ok');
+      }
+      renderReceipt(r.order, { refund_cents: r.refund.total_cents });
     } catch { /* toast already shown */ }
   };
 
@@ -1111,9 +1146,23 @@
     const kind = s === 'paid' ? 'ok' : s === 'open' || s === 'partial_refund' ? 'warn' : 'err';
     return `<span class="op-badge ${kind}">${s.replace('_', ' ')}</span>`;
   }
-  function renderReceipt(order, { change_cents = null, members = [] } = {}) {
+  // A receipt may hide a number, but it must never invent one. While the ringing
+  // cashier's own drawer is open the server withholds that drawer's payment rows
+  // (blind close): they come back as {withheld:true, amount_cents:null}. Printing
+  // those nulls as money produced "withheld $0.00" with no change line above a
+  // TOTAL of $31.82 — a self-contradicting document. Withheld rows print as what
+  // they are, and the refunded amount (never withheld) is printed from the refund
+  // response so the guest copy always states it.
+  function renderReceipt(order, { change_cents = null, members = [], refund_cents = null } = {}) {
     const change = change_cents !== null ? change_cents
-      : order.payments.reduce((a, p) => a + p.change_cents, 0);
+      : order.payments.reduce((a, p) => a + (p.change_cents || 0), 0);
+    const withheld = order.payments.some((p) => p.withheld);
+    const payRow = (p) => (p.withheld
+      ? `<tr><td>${p.refund ? 'REFUND ' : ''}Tender <span class="muted">hidden until drawer close</span></td>
+         <td class="num">—</td></tr>`
+      : `<tr><td>${p.amount_cents < 0 ? 'REFUND ' : ''}${esc(tenderLabel(p.method))}
+          ${p.ref ? `<span class="muted mono">${esc(p.ref)}</span>` : ''}</td>
+        <td class="num">${money(p.amount_cents)}</td></tr>`);
     const paperTop = `
       <div class="paper print-block">
         <h3>OWL PARK <span class="muted">Owl Park</span></h3>
@@ -1137,12 +1186,12 @@
           <tr class="grand"><td class="grand">TOTAL</td><td class="num grand">${money(order.total_cents)}</td></tr>
         </table>
         <div class="rule"></div>
-        <table>${order.payments.map((p) => `
-          <tr><td>${p.amount_cents < 0 ? 'REFUND ' : ''}${esc(tenderLabel(p.method))}
-            ${p.ref ? `<span class="muted mono">${esc(p.ref)}</span>` : ''}</td>
-          <td class="num">${money(p.amount_cents)}</td></tr>`).join('')}
+        <table>${order.payments.map(payRow).join('')}
+          ${refund_cents ? `<tr><td>Refunded this transaction</td><td class="num">−${money(refund_cents)}</td></tr>` : ''}
           ${change > 0 ? `<tr><td>Change</td><td class="num">${money(change)}</td></tr>` : ''}
         </table>
+        ${withheld ? `<div class="muted">Tender details are hidden while this drawer is open —
+          reprint after the drawer is closed, or ask a manager, for the full breakdown.</div>` : ''}
         <div class="rule"></div>
         <div class="muted">Thank you for visiting! · ${order.tickets.length} ticket(s)</div>
       </div>`;

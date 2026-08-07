@@ -59,6 +59,11 @@ orderId, payments, actorId?)` — the drawer is resolved internally, and the opt
 tendered) when a caller supplies it, falling back to the order's cashier (the web
 store passes none). Drawer attribution always follows the order's cashier regardless.
 
+A timed-entry ticket SHALL always be issued valid for its own session: when
+`validity_days` from the purchase date would end before the session does, `valid_to`
+is widened to the session's end — neither a sale nor an exchange may produce an
+instantly-expired ticket.
+
 #### Scenario: Cash with change
 - **WHEN** the total is $43.50 and the cashier enters $50 cash
 - **THEN** the order finalizes, change $6.50 is displayed, and a payments row records both
@@ -93,9 +98,19 @@ taxes, tenders, change) and one ticket stub per issued ticket with holder-nameab
 validity, session (if any), and the ticket code as text + Code 39 barcode. Browser print
 styling makes each ticket its own page.
 
+While the viewing cashier's own drawer is open, that drawer's payment rows are withheld
+(blind close); the receipt SHALL render withheld rows as "hidden until drawer close" —
+never a fabricated amount — label negative rows `REFUND`, and a refund receipt SHALL
+always print the refunded total (which is never withheld).
+
 #### Scenario: Reprint
 - **WHEN** a cashier opens a past paid order from order search
 - **THEN** the receipt and all ticket stubs can be re-displayed and reprinted.
+
+#### Scenario: Withheld tender never prints as $0.00
+- **WHEN** a cashier with an open drawer reprints a cash order rung on that drawer
+- **THEN** the tender row reads "hidden until drawer close" with no amount, and the
+  receipt notes the full breakdown returns after drawer close.
 
 ### Requirement: Order management (void/refund)
 
@@ -106,8 +121,12 @@ carry `approver {username, password}` resolving to an active manager or admin. A
 approver failure modes (missing, unknown, wrong password, wrong role, locked, or — in
 production mode — an approver still owing a forced password change) SHALL
 return one generic 403 `approval_required`; approver attempts SHALL count toward the
-approver account's lockout counters and SHALL be rate-limited per IP (429) before any
-password hashing. A refund SHALL: void exactly the affected tickets, decrement the
+approver account's lockout counters, and FAILED approver attempts SHALL be throttled
+per client IP (429 before any password hashing once the failure budget is spent) —
+successful approvals never consume the budget, so a manager legitimately working a
+long refund queue is never capped. The client IP for both the throttle bucket and
+the approver audit rows SHALL be resolved through the `OWLPOS_TRUST_PROXY` rules
+platform-core defines for login. A refund SHALL: void exactly the affected tickets, decrement the
 sessions those tickets actually occupy, record negative payment rows allocated across
 the original tender methods (each capped by that method's remaining net), record the
 event in `refunds`/`refund_lines` at line granularity, and append an audit entry.
@@ -119,7 +138,9 @@ session capacity). An absent/empty selection is a full refund of everything stil
 live, voiding remaining tickets even if used (manager override). An order with some
 quantities refunded and some live SHALL have status `partial_refund`; a fully
 refunded order gets status `refunded` and `refunded_at`. Refunded tickets scan as
-denied thereafter; remaining tickets stay valid.
+denied thereafter; remaining tickets stay valid. Refunded membership units SHALL be
+reversed per the membership spec's "Per-unit posted member records" requirement (a
+minted member is suspended, a renewal gives back the refunded duration).
 
 #### Scenario: Refund blocks the gate
 - **WHEN** a paid order is refunded and its ticket code is scanned
@@ -146,6 +167,25 @@ denied thereafter; remaining tickets stay valid.
 - **WHEN** a void or refund is submitted with an `approver` whose role is `gate` (or a
   wrong password, or no approver at all)
 - **THEN** the response is 403 `approval_required` and the order is unchanged.
+
+### Requirement: Abandoning open orders
+
+`POST /api/pos/orders/:id/abandon` (seller roles) SHALL void an open order without
+manager re-auth — nothing is paid, no tickets exist, and no capacity is held. A seller
+may abandon only their OWN open order; managers/admins may abandon any. Anything not
+`open` answers 409. The POS SHALL call it whenever the cashier walks away from a
+created-but-untendered order — tender dialog cancelled/Esc, error paths that close the
+dialog, cart cleared, or TENDER re-pressed over a live order — so an aborted tender
+never leaves a permanent orphaned `open` row; a finalize in flight is never abandoned.
+
+#### Scenario: Cancelled tender leaves no orphan
+- **WHEN** a cashier presses TENDER, then closes the dialog without paying
+- **THEN** the order is voided (audit `pos.order.abandon`) and order search shows no
+  lingering `open` row.
+
+#### Scenario: Paid orders cannot be abandoned
+- **WHEN** abandon is called on a paid order
+- **THEN** the response is 409 and the order is unchanged.
 
 ### Requirement: Shared posting path
 

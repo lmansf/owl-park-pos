@@ -51,6 +51,7 @@ const BOOTSTRAP = 'operator-bootstrap-pass';
 const PROD_ENV = {
   OWLPOS_MODE: 'production', OWLPOS_SECRET: SECRET,
   OWLPOS_BOOTSTRAP_ADMIN_PASSWORD: BOOTSTRAP,
+  OWLPOS_INIT_DB: '1', // these tests are deliberate first boots on a scratch path
 };
 
 function sign(payload) {

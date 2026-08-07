@@ -25,6 +25,10 @@ revocation in every mode; still no 2FA.
   over a denylist because serverless demo instances have per-instance DBs).
 - Backup authentication for the back office if exposed beyond the LAN (VPN or IP
   allowlist; the store is the only surface that should ever be public).
+- At-rest protection: the database file, its WAL sidecars, every snapshot and every
+  pre-restore copy are mode 0600 (shipped) — they carry scrypt hashes, member PII and
+  plaintext gate codes. Still open: a dedicated service account, and full-disk or
+  filesystem-level encryption on the host.
 
 ## 2. Real payments
 
@@ -51,6 +55,18 @@ One SQLite file today; hosted demo is intentionally ephemeral.
   WAL checkpointing policy. (shipped: `backups-ops` — scheduled + manual snapshots,
   offline restore tool, checkpoint after every snapshot; offsite copy stays an
   operator task, see the user-guide runbook)
+- Clean shutdown: SIGINT/SIGTERM drain in-flight requests, checkpoint the WAL and close
+  the database, so an ordinary stop leaves one self-contained file and the restore tool
+  can tell a stopped server from a running one (it probes for exclusive access rather
+  than looking for `-wal`/`-shm`). (shipped)
+- Cross-process write contention: a 5 s `busy_timeout` on the server's connection so
+  operator tooling and live selling stop knocking each other over. The `tools/` CLIs
+  still open bare connections — give them the same timeout and wrap their multi-statement
+  writes in one transaction. (partly shipped)
+- Fail-closed data path: production refuses to start when `OWLPOS_DB` does not exist
+  (`OWLPOS_INIT_DB=1` for a deliberate first boot), instead of seeding a demo park onto
+  an unmounted volume. Still open: a startup assertion that the mounted filesystem is
+  the expected one (device/UUID check) for the remount-elsewhere case. (shipped)
 - Either commit to single-host SQLite (fine for one venue; document the operational
   envelope) or plan a Postgres migration path for multi-venue.
 - Crash-safe printing/ticket issuance: idempotent finalize retries (order posting is

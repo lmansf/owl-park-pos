@@ -63,6 +63,19 @@ new membership to be created at finalize. `finalizeOrder` SHALL consume these co
 no code path SHALL parse member information out of the human-readable line description,
 which becomes display-only.
 
+One membership sold SHALL be one membership delivered: a line carrying `member_intent`
+(the POS new-member prompt, the gift path) ALWAYS mints its own member — even when an
+active member already carries that email — and only an explicit `member_id` renews. A
+bare line (no member info, buyer's own email) keeps the legacy renew-by-email match,
+but at most once per (program, email) per order, so further units mint fresh members
+instead of silently stacking duration onto the member the first unit just posted.
+
+#### Scenario: Two memberships to one email are two members
+- **WHEN** an order finalizes with two new-member membership units naming the same
+  household email
+- **THEN** two distinct members are minted, each with a single program duration — never
+  one member with doubled duration.
+
 #### Scenario: Renewal without text parsing
 - **WHEN** a renewal line is finalized for member #42
 - **THEN** the member's expiry extends based on `order_lines.member_id = 42`, regardless
@@ -72,6 +85,30 @@ which becomes display-only.
 - **WHEN** a store checkout includes a membership for "Ada <ada@example.com>"
 - **THEN** the new member is created from the line's `member_intent` payload and the
   description is never parsed.
+
+### Requirement: Per-unit posted member records
+
+`order_lines.member_id` can hold only one member while a qty>1 membership line posts
+one member per unit, so `finalizeOrder` SHALL record every member a line actually
+posted in `order_line_members` — one row per unit, marked `minted` (a member this
+order created) or `renewed` (an existing member extended). Refunding q units of a
+membership line SHALL reverse exactly q posted memberships from that set, most
+recently posted first: a minted member is suspended, a renewed member gives back one
+program duration. Order views (back office and guest) SHALL list every member posted
+on the line. `member_id` SHALL stay stamped with the last posted member for
+compatibility with anything still joining through it, and the migration SHALL
+backfill link rows for already-posted lines from that stamp so historical refunds
+keep working.
+
+#### Scenario: Qty-2 line refunds deterministically
+- **WHEN** a qty-2 membership line minted members A then B and one unit is refunded
+- **THEN** B (the most recently minted) is suspended while A keeps its full term, and
+  refunding the remaining unit suspends A too.
+
+#### Scenario: Qty-2 purchase delivers two pass cards
+- **WHEN** a guest buys a qty-2 membership line online
+- **THEN** the confirmation shows both minted members' pass cards, not just the last
+  one stamped on the line.
 
 ### Requirement: Legacy line backfill
 
