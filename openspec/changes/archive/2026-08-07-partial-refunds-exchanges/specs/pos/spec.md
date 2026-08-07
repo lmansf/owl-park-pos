@@ -6,19 +6,24 @@
 
 Sellers SHALL be able to void an unpaid order, refund a paid or partially refunded
 order in full, or refund selected lines/quantities — every such request gated by the
-manager re-auth approver credential established by security-hardening (the body carries
-`approver {username, password}` resolving to an active manager/admin; all failures are
-one generic 403). A refund SHALL: void exactly the affected tickets, decrement the
+manager re-auth approver credential established by security-hardening: the body must
+carry `approver {username, password}` resolving to an active manager or admin. All
+approver failure modes (missing, unknown, wrong password, wrong role, locked) SHALL
+return one generic 403 `approval_required`; approver attempts SHALL count toward the
+approver account's lockout counters and SHALL be rate-limited per IP (429) before any
+password hashing. A refund SHALL: void exactly the affected tickets, decrement the
 sessions those tickets actually occupy, record negative payment rows allocated across
 the original tender methods (each capped by that method's remaining net), record the
 event in `refunds`/`refund_lines` at line granularity, and append an audit entry.
 Explicit line selections SHALL be validated server-side (integer ids belonging to the
 order, integer qty within the unrefunded remainder, no duplicates) and SHALL refuse
-lines whose tickets are already used or exchanged away; an absent/empty selection is a
-full refund of everything still live, voiding remaining tickets even if used (manager
-override). An order with some quantities refunded and some live SHALL have status
-`partial_refund`; a fully refunded order gets status `refunded` and `refunded_at`.
-Refunded tickets scan as denied thereafter; remaining tickets stay valid.
+lines whose tickets are already used or exchanged away; tickets voided by a session
+cancellation remain refundable per line (consumed before valid tickets, releasing no
+session capacity). An absent/empty selection is a full refund of everything still
+live, voiding remaining tickets even if used (manager override). An order with some
+quantities refunded and some live SHALL have status `partial_refund`; a fully
+refunded order gets status `refunded` and `refunded_at`. Refunded tickets scan as
+denied thereafter; remaining tickets stay valid.
 
 #### Scenario: Refund blocks the gate
 - **WHEN** a paid order is refunded and its ticket code is scanned
@@ -28,6 +33,12 @@ Refunded tickets scan as denied thereafter; remaining tickets stay valid.
 - **WHEN** one child ticket is refunded from a 3-ticket order
 - **THEN** that ticket scans denied, the other two scan ok, and the negative payment row
   equals that line's total.
+
+#### Scenario: Cancelled-session line refunds per line
+- **WHEN** a session is cancelled (voiding its tickets) and one of its lines is then
+  refunded by explicit selection
+- **THEN** the refund succeeds for the line's unrefunded remainder and the cancelled
+  session's sold count is not decremented again.
 
 #### Scenario: Cashier void with a manager standing by
 - **WHEN** a cashier voids an open order and a manager enters their own credentials in

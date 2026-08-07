@@ -31,6 +31,8 @@ ALTER TABLE orders_new RENAME TO orders;
 
 ALTER TABLE order_lines ADD COLUMN refunded_qty INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tickets ADD COLUMN exchanged_from INTEGER REFERENCES tickets(id);
+CREATE INDEX idx_tickets_exchanged_from ON tickets(exchanged_from)
+  WHERE exchanged_from IS NOT NULL;
 
 CREATE TABLE refunds (
   id INTEGER PRIMARY KEY,

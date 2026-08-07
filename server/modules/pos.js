@@ -394,9 +394,11 @@ function finalizeOrder(db, ctx, orderId, payments) {
 }
 
 // Refund a paid (or partially refunded) order, in full or per line/quantity.
-// selection = [{order_line_id, qty}] refunds exactly those quantities; an
-// absent/empty selection is a full refund of everything still live (legacy
-// behavior: voids remaining tickets even if already used — a manager decision).
+// selection = [{order_line_id, qty}] refunds exactly those quantities, drawing
+// from tickets a session cancellation voided first, then valid tickets; used or
+// exchanged-away tickets are refused. An absent/empty selection is a full refund
+// of everything still live (legacy behavior: voids remaining tickets even if
+// already used — a manager decision).
 // Every refund: affected tickets void, their sessions' sold released, one
 // refunds header + refund_lines rows, negative payment rows allocated across
 // the original tender methods, order status derived from per-line progress
@@ -495,17 +497,29 @@ function refundOrder(db, ctx, orderId, userId, approverId, selection) {
       if (line.kind === 'ticket') {
         if (explicit) {
           const valid = db
+            .prepare("SELECT * FROM tickets WHERE order_line_id = ? AND status = 'valid' ORDER BY id")
+            .all(line.id);
+          // unclaimed void tickets = cancel-voided value nobody has refunded yet:
+          // every refunded unit accounts for exactly one non-superseded void row
+          // (it flipped one or claimed one), and exchanged-away tickets are
+          // superseded by their replacement so they never count
+          const voidRows = db
             .prepare(
-              "SELECT * FROM tickets WHERE order_line_id = ? AND status = 'valid' ORDER BY id LIMIT ?"
+              `SELECT COUNT(*) AS n FROM tickets t
+               WHERE t.order_line_id = ? AND t.status = 'void'
+                 AND NOT EXISTS (SELECT 1 FROM tickets r WHERE r.exchanged_from = t.id)`
             )
-            .all(line.id, q);
-          if (valid.length < q) {
+            .get(line.id).n;
+          const claimable = Math.max(0, voidRows - line.refunded_qty);
+          if (claimable + valid.length < q) {
             throw new ApiError(
               409, 'tickets_used',
-              `Line ${line.id}: only ${valid.length} unused ticket(s) left — used or exchanged tickets cannot be refunded`
+              `Line ${line.id}: only ${claimable + valid.length} refundable ticket(s) left — used or exchanged tickets cannot be refunded`
             );
           }
-          voidedTickets = valid;
+          // claim cancel-voided value first (no ticket flips, no capacity move),
+          // then flip valid tickets for the rest
+          voidedTickets = valid.slice(0, Math.max(0, q - claimable));
         } else {
           // legacy full-refund sweep: void everything not already void
           voidedTickets = db

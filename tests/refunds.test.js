@@ -328,6 +328,77 @@ test('pos: refund validation battery — over-refund, IDOR, bad payloads', async
 
 });
 
+test('pos: cancelled-session tickets stay refundable per line', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const cashier = await login(base, 'cashier');
+  const mgr = await login(base, 'manager');
+  const sell = (await cashier('GET', '/api/catalog/sellable?channel=pos')).data.products;
+  const adult = sell.find((p) => p.sku === 'ADULT');
+  const plntm = sell.find((p) => p.sku === 'PLNTM');
+  const sessions = (await (await fetch(base + `/api/events/${plntm.event_id}/sessions`)).json()).sessions;
+  const sold = (id) => db.prepare('SELECT sold FROM event_sessions WHERE id = ?').get(id).sold;
+
+  await t.test('explicit selection consumes cancel-voided tickets, no capacity re-release', async () => {
+    const o = await paidOrder(cashier, [
+      { product_id: adult.id, qty: 1 },
+      { product_id: plntm.id, qty: 2, event_session_id: sessions[0].id },
+    ]);
+    const plLine = o.lines.find((l) => l.sku === 'PLNTM');
+    const cancel = await mgr('POST', `/api/events/sessions/${sessions[0].id}/cancel`, {});
+    assert.equal(cancel.status, 200);
+    assert.equal(cancel.data.voided_tickets, 2);
+    const soldAfterCancel = sold(sessions[0].id);
+
+    const r = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {
+      approver: APPROVER, lines: [{ order_line_id: plLine.id, qty: 2 }],
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.refund.total_cents, plLine.line_total_cents);
+    assert.equal(r.data.order.status, 'partial_refund');
+    assert.equal(r.data.voided_tickets, 0); // already void — nothing flipped
+    assert.equal(r.data.order.lines.find((l) => l.id === plLine.id).refunded_qty, 2);
+    assert.equal(sold(sessions[0].id), soldAfterCancel);
+  });
+
+  await t.test('cancel-voided consumed before valid; exchanged-away still excluded', async () => {
+    const o = await paidOrder(cashier, [
+      { product_id: plntm.id, qty: 2, event_session_id: sessions[1].id },
+    ]);
+    const line = o.lines[0];
+    const ex = await mgr('POST', `/api/pos/tickets/${o.tickets[0].id}/exchange`, {
+      approver: APPROVER, event_session_id: sessions[2].id,
+    });
+    assert.equal(ex.status, 200);
+    assert.equal((await mgr('POST', `/api/events/sessions/${sessions[1].id}/cancel`, {})).status, 200);
+    const soldTarget = sold(sessions[2].id);
+
+    // qty 1 must take the cancel-voided ticket, keeping the exchanged replacement
+    const r1 = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {
+      approver: APPROVER, lines: [{ order_line_id: line.id, qty: 1 }],
+    });
+    assert.equal(r1.status, 200);
+    assert.equal(db.prepare('SELECT status FROM tickets WHERE id = ?').get(ex.data.ticket.id).status, 'valid');
+    assert.equal(sold(sessions[2].id), soldTarget);
+
+    // the remaining qty is the replacement itself: refunding it releases its session
+    const r2 = await mgr('POST', `/api/pos/orders/${o.id}/refund`, {
+      approver: APPROVER, lines: [{ order_line_id: line.id, qty: 1 }],
+    });
+    assert.equal(r2.status, 200);
+    assert.equal(r2.data.voided_tickets, 1);
+    assert.equal(db.prepare('SELECT status FROM tickets WHERE id = ?').get(ex.data.ticket.id).status, 'void');
+    assert.equal(sold(sessions[2].id), soldTarget - 1);
+    const done = (await cashier('GET', `/api/pos/orders/${o.id}`)).data.order;
+    assert.equal(done.status, 'refunded');
+    // money summed exactly to the line total across the two slices
+    const agg = db.prepare(
+      'SELECT SUM(total_cents) AS total FROM refund_lines WHERE order_line_id = ?'
+    ).get(line.id);
+    assert.equal(agg.total, line.line_total_cents);
+  });
+});
+
 // separate server: the approver credential path is rate-limited per IP
 // (20/min) and the battery above spends most of that budget
 test('pos: refund state guards + XSS round-trip', async (t) => {
