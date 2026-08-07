@@ -1,13 +1,16 @@
 'use strict';
 const crypto = require('node:crypto');
+const net = require('node:net');
 const { ApiError } = require('./http');
 const { now } = require('./db');
 
 const SESSION_HOURS = 12;
 const LOCKOUT_FAILS = 5;        // consecutive failures before a timed lock
 const LOCKOUT_MINUTES = 15;
-const RATE_LIMIT_ATTEMPTS = 20; // per IP, per window, checked before any scrypt work
+const RATE_LIMIT_ATTEMPTS = 20;      // per bucket, per window, checked before any scrypt work
 const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_IP_CEILING = 120;   // per-IP backstop across all accounts (bounds scrypt burn)
+const RATE_LIMIT_MAX_TRACKED = 10_000; // hard cap on tracked buckets (forged keys can't OOM us)
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -50,7 +53,33 @@ function resolveConfig(env = process.env) {
   } else if (!secret) {
     secret = crypto.randomBytes(32).toString('hex');
   }
-  return { mode, secret, secure: mode === 'production' || Boolean(env.VERCEL) };
+  return {
+    mode,
+    secret,
+    secure: mode === 'production' || Boolean(env.VERCEL),
+    trustProxy: trustProxy(env),
+  };
+}
+
+// OWLPOS_TRUST_PROXY=1 declares that exactly one trusted reverse proxy sits in
+// front of the app (the production topology in docs/production-roadmap.md), so
+// the real client address is the RIGHTMOST X-Forwarded-For entry — the one that
+// proxy appended. It is an explicit opt-in: X-Forwarded-For is client-writable,
+// and honoring it on a directly exposed server would let an attacker pick their
+// own rate-limit bucket per request.
+function trustProxy(env = process.env) {
+  return /^(1|true|yes)$/i.test(String(env.OWLPOS_TRUST_PROXY || ''));
+}
+
+// Explicit, safe client-IP resolution: the TCP peer address unless a trusted
+// proxy is declared. Falls back to the peer when the forwarded value is not a
+// syntactically valid IP.
+function clientIp(req, trusted = trustProxy()) {
+  const peer = req.socket?.remoteAddress || 'unknown';
+  if (!trusted) return peer;
+  const forwarded = String(req.headers?.['x-forwarded-for'] || '');
+  const last = forwarded.split(',').pop().trim();
+  return net.isIP(last) ? last : peer;
 }
 
 // Sessions are stateless signed tokens (HMAC), not DB rows: on serverless hosts
@@ -157,23 +186,30 @@ function verifyManagerCredential(db, cred, ip) {
   return publicUser(r.user);
 }
 
-// Fixed-window per-IP limiter factory. Each caller gets its own closure-scoped
-// bucket so parallel createApp instances (tests, serverless warm starts) never
-// share state, and login vs. approver traffic can't starve each other. Pruned
-// inline — no setInterval, which would keep test processes alive and is
-// serverless-hostile. The returned guard runs before any scrypt work.
-function createRateLimiter() {
-  const attempts = new Map(); // ip -> { count, windowStart }
+// Fixed-window limiter factory. Buckets key on the resolved client IP by
+// default; `key(req, ip)` narrows that (e.g. per account). Each caller gets its
+// own closure-scoped bucket so parallel createApp instances (tests, serverless
+// warm starts) never share state, and login vs. approver traffic can't starve
+// each other. Pruned inline — no setInterval, which would keep test processes
+// alive and is serverless-hostile — and hard-capped so attacker-chosen keys
+// can't grow the map without bound. The returned guard runs before any scrypt
+// work.
+function createRateLimiter({ max = RATE_LIMIT_ATTEMPTS, trusted, key } = {}) {
+  const attempts = new Map(); // bucket key -> { count, windowStart }
   return function rateLimit(req, res) {
-    const ip = req.socket?.remoteAddress || 'unknown';
+    const ip = clientIp(req, trusted ?? trustProxy());
+    const bucket = key ? key(req, ip) : ip;
     const t = Date.now();
     for (const [k, v] of attempts) {
       if (t - v.windowStart >= RATE_LIMIT_WINDOW_MS) attempts.delete(k);
     }
-    const slot = attempts.get(ip) || { count: 0, windowStart: t };
+    if (!attempts.has(bucket) && attempts.size >= RATE_LIMIT_MAX_TRACKED) {
+      attempts.delete(attempts.keys().next().value); // evict the oldest bucket
+    }
+    const slot = attempts.get(bucket) || { count: 0, windowStart: t };
     slot.count++;
-    attempts.set(ip, slot);
-    if (slot.count > RATE_LIMIT_ATTEMPTS) {
+    attempts.set(bucket, slot);
+    if (slot.count > max) {
       res.setHeader('retry-after', Math.ceil((slot.windowStart + RATE_LIMIT_WINDOW_MS - t) / 1000));
       throw new ApiError(429, 'too_many_attempts', 'Too many attempts — try again shortly');
     }
@@ -182,7 +218,20 @@ function createRateLimiter() {
 }
 
 function mount(router, db, config) {
-  const rateLimit = createRateLimiter();
+  // Two-tier throttle for the credential routes. The primary bucket keys on
+  // (client IP, account) so a flood of garbage usernames cannot 429 every
+  // station in the venue — behind a reverse proxy all stations share one peer
+  // address, so set OWLPOS_TRUST_PROXY there to key on real client IPs. The
+  // wider per-IP ceiling still bounds the total scrypt work one address can
+  // force by rotating usernames. Login keys on the attempted username (body),
+  // change-password on the session user — same account, same bucket, so a
+  // stolen cookie can't sidestep the login throttle. The session user wins over
+  // the body so a cookie holder can't mint fresh buckets via a forged username
+  // field.
+  const accountKey = (req, ip) =>
+    `${ip}|${String(req.user?.username ?? req.body?.username ?? '').toLowerCase().slice(0, 64)}`;
+  const rateLimit = createRateLimiter({ trusted: config.trustProxy, key: accountKey });
+  const floodLimit = createRateLimiter({ trusted: config.trustProxy, max: RATE_LIMIT_IP_CEILING });
 
   function issueCookie(res, user) {
     const token = signToken(
@@ -193,6 +242,7 @@ function mount(router, db, config) {
 
   router.post('/api/auth/login', null, (req, res) => {
     const ip = rateLimit(req, res); // before any DB lookup or scrypt work
+    floodLimit(req, res);
     const { username, password } = req.body || {};
     const r = verifyCredential(db, username, password, ip);
     if (!r.ok) {
@@ -204,7 +254,13 @@ function mount(router, db, config) {
     return { user: publicUser(r.user), must_change_password: Boolean(r.user.must_change_password) };
   });
 
+  // Sessions are stateless, so clearing the browser cookie alone leaves a
+  // captured token string valid until its 12h exp. Sign-out must actually
+  // revoke: bump token_epoch (like change-password does), which kills every
+  // outstanding token for the user — the right call on shared POS terminals.
   router.post('/api/auth/logout', [], (req, res) => {
+    db.prepare('UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?').run(req.user.id);
+    audit(db, req.user.id, 'auth.logout', { username: req.user.username });
     res.setHeader('set-cookie', `opsid=; ${cookieFlags(config, 0)}`);
     return { ok: true };
   });
@@ -222,6 +278,7 @@ function mount(router, db, config) {
   // response.
   router.post('/api/auth/change-password', [], (req, res) => {
     const ip = rateLimit(req, res); // before any DB lookup or scrypt work
+    floodLimit(req, res);
     const { current_password, new_password } = req.body || {};
     if (typeof current_password !== 'string' || typeof new_password !== 'string') {
       throw new ApiError(400, 'bad_input', 'current_password and new_password are required');
@@ -276,5 +333,5 @@ function publicUser(u) {
 
 module.exports = {
   mount, resolveUser, resolveConfig, verifyManagerCredential, createRateLimiter,
-  hashPassword, verifyPassword, randomCode, audit,
+  clientIp, hashPassword, verifyPassword, randomCode, audit,
 };
