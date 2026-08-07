@@ -432,4 +432,53 @@ test('drawer: sessions, blind close, Z-reports, cash attribution', async (t) => 
     assert.ok((csv.headers.get('content-type') || '').includes('text/csv'));
     assert.ok((await csv.text()).includes('Unattributed POS cash'));
   });
+
+  // An abandoned drawer used to be invisible: not a closed session, and its
+  // payments carry a session id so they are not "unattributed" either.
+  await t.test('drawers report: an abandoned open drawer is surfaced, then recoverable', async () => {
+    const before = (await mgr('GET', '/api/reports/drawers')).data.sections;
+    assert.equal(before.some((s) => s.title.startsWith('OPEN drawer sessions')), false,
+      'no section while every drawer is closed');
+    const closedBefore = before.find((s) => s.title === 'Closed drawer sessions').rows.length;
+
+    const open = (await cashier('POST', '/api/drawer/open',
+      { float_cents: 20000, terminal: 'abandoned' })).data.session;
+    const sale = (await cashier('POST', '/api/pos/orders',
+      { lines: [{ product_id: adult.id, qty: 1 }] })).data.order;
+    assert.equal((await cashier('POST', `/api/pos/orders/${sale.id}/finalize`, {
+      payments: [{ method: 'cash', amount_cents: sale.total_cents }],
+    })).status, 200);
+    // ...and the cashier goes home without closing.
+
+    const rep = (await mgr('GET', '/api/reports/drawers')).data;
+    const sec = rep.sections[0];
+    assert.ok(sec.title.startsWith('OPEN drawer sessions'), 'leads the report');
+    assert.equal(sec.rows.length, 1);
+    assert.equal(sec.rows[0].session_id, open.id);
+    assert.equal(sec.rows[0].terminal, 'abandoned');
+    assert.equal(sec.rows[0].cashier, 'Casey Cashier');
+    assert.equal(sec.rows[0].float_cents, 20000);
+    assert.equal(sec.rows[0].payments, 1);
+    assert.equal(sec.totals.float_cents, 20000);
+    assert.ok(sec.note.includes('/api/drawer/sessions/'), 'names the recovery route');
+    // blind close still holds: no expected/counted cash for an open session
+    for (const c of ['expected_cents', 'counted_cents', 'cash_cents', 'over_short_cents']) {
+      assert.ok(!sec.columns.includes(c), `open sessions must not expose ${c}`);
+    }
+    // the closed section is unchanged — that is exactly why the section above matters
+    assert.equal(rep.sections.find((s) => s.title === 'Closed drawer sessions').rows.length,
+      closedBefore);
+    const csv = await (await mgr.raw('/api/reports/drawers?format=csv')).text();
+    assert.ok(csv.includes('OPEN drawer sessions'), 'the CSV carries it too');
+
+    // manager counts the till and force-closes someone else's drawer
+    const forced = await mgr('POST', `/api/drawer/sessions/${open.id}/close`,
+      { counted_cents: 20000 + sale.total_cents, note: 'abandoned till counted' });
+    assert.equal(forced.status, 200);
+    assert.equal(forced.data.session.over_short_cents, 0);
+    const after = (await mgr('GET', '/api/reports/drawers')).data.sections;
+    assert.equal(after.some((s) => s.title.startsWith('OPEN drawer sessions')), false);
+    assert.equal(after.find((s) => s.title === 'Closed drawer sessions').rows.length,
+      closedBefore + 1);
+  });
 });
