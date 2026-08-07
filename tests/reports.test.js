@@ -432,13 +432,17 @@ test('reports: group rollups (sales, admissions, dashboard, CSV, security)', asy
     const adult = lineAgg(bySku.ADULT.id);
     const child = lineAgg(bySku.CHILD.id);
     const mem = lineAgg(bySku['MEM-EXP'].id);
-    const d = (await cashier.call('GET', '/api/reports/dashboard')).data;
+    const d = (await manager.call('GET', '/api/reports/dashboard')).data;
     assert.ok(Array.isArray(d.revenue_by_group_today));
     assert.deepEqual(d.revenue_by_group_today, [
       { group: 'Tickets',
         revenue_cents: (adult.gross - adult.disc + adult.tax) + (child.gross - child.disc + child.tax) },
       { group: 'Ungrouped', revenue_cents: mem.gross - mem.disc + mem.tax },
     ]);
+    const cashierDash = (await cashier.call('GET', '/api/reports/dashboard')).data;
+    assert.equal(cashierDash.revenue_by_group_today, undefined,
+      'by-group breakdown is manager/admin only');
+    assert.equal(typeof cashierDash.revenue_cents, 'number');
   });
 
   await t.test('grouped CSV matches JSON: rows, totals, note as final row, filename', async () => {

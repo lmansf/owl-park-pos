@@ -487,7 +487,8 @@ function mount(router, ctx) {
     return true;
   };
 
-  router.get('/api/reports/dashboard', [], () => dashboard(db, hasGroups ? groupsMod : null));
+  router.get('/api/reports/dashboard', [], (req) =>
+    dashboard(db, hasGroups && MANAGERS.includes(req.user.role) ? groupsMod : null));
 
   router.get('/api/reports/sales', MANAGERS, (req, res) => {
     const rng = parseRange(req.query);
