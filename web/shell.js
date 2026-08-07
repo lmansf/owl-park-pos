@@ -15,6 +15,7 @@ window.op = (() => {
     { href: '/price-programs.html', label: 'Pricing', roles: ['admin', 'manager'] },
     { href: '/accounts.html', label: 'Accounts', roles: ['admin', 'manager'] },
     { href: '/reports.html', label: 'Reports', roles: ['admin', 'manager'] },
+    { href: '/backups.html', label: 'Backups', roles: ['admin'] },
     { href: '/help.html', label: 'Help', roles: ['admin', 'manager', 'cashier', 'gate'] },
   ];
 
@@ -96,11 +97,18 @@ window.op = (() => {
       <div class="op-user">${esc(me.display_name)} · ${me.role}<button id="op-passwd" title="Change password">Password</button><button id="op-logout">Sign out</button></div>`;
     document.body.prepend(bar);
     fetch('/api/health').then((r) => r.json()).then((h) => {
-      if (!h.ephemeral) return;
-      const note = document.createElement('div');
-      note.className = 'op-demo-banner';
-      note.textContent = 'Hosted demo — the database is ephemeral and reseeds itself periodically. Changes are not saved.';
-      bar.after(note);
+      if (h.ephemeral) {
+        const note = document.createElement('div');
+        note.className = 'op-demo-banner';
+        note.textContent = 'Hosted demo — the database is ephemeral and reseeds itself periodically. Changes are not saved.';
+        bar.after(note);
+      }
+      if (h.disk_low) { // admin/manager only — anon health has no disk fields
+        const warn = document.createElement('div');
+        warn.className = 'op-demo-banner';
+        warn.textContent = 'Low disk space on the server — back up and free space before it fills up.';
+        bar.after(warn);
+      }
     }).catch(() => {});
     document.getElementById('op-logout').onclick = async () => {
       await api('/api/auth/logout', { method: 'POST', body: {} });
