@@ -26,6 +26,13 @@
   .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
   .checks { display: flex; gap: 16px; padding: 6px 0; }
   .checks label { display: flex; align-items: center; gap: 6px; }
+  /* terminals panel */
+  .term-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
+  .term-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .term-head .nm { flex: 1; min-width: 0; font-weight: 600; }
+  .term-head .nm small { display: block; color: var(--muted); font-weight: 400; }
+  .term-pages { display: flex; flex-direction: column; gap: 4px; padding: 8px 0 4px; }
+  .term-pages label { display: flex; align-items: center; gap: 6px; }
   /* live preview mirrors the POS grid */
   .prev-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 10px; }
   .prev-btn { min-height: 62px; background: var(--panel); border: 1px solid var(--line); color: var(--text);
@@ -47,6 +54,12 @@
       </div>
       <div id="page-list"></div>
       <p class="op-muted" style="font-size:13px">POS shows active pages in sort order. With no active pages, the terminal falls back to the automatic product grid.</p>
+      <div class="mb-head" style="margin-top:16px">
+        <h2>Terminals</h2>
+        <button class="op-btn" id="btn-new-terminal">New terminal</button>
+      </div>
+      <div id="terminal-list"></div>
+      <p class="op-muted" style="font-size:13px">A POS register claims a terminal by name and then shows only the pages assigned to it. Terminals with no assigned pages — and registers with no claim — show the default menu above.</p>
     </div>
 
     <div class="op-card" id="buttons-card">
@@ -85,6 +98,18 @@
     <label class="op-field"><span>Name</span><input name="name" required style="width:100%"></label>
     <label class="op-field"><span>Sort</span><input name="sort" type="number" value="0" style="width:100%"></label>
     <div class="checks"><label><input type="checkbox" name="active" checked> Active</label></div>
+    <div class="modal-actions">
+      <button type="button" class="op-btn secondary" data-close>Cancel</button>
+      <button class="op-btn">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="op-modal" id="terminal-modal">
+  <h2 id="terminal-modal-title">New terminal</h2>
+  <form id="terminal-form">
+    <label class="op-field"><span>Name</span><input name="name" required maxlength="80" style="width:100%" placeholder="Front Gate, Café…"></label>
+    <div class="checks"><label><input type="checkbox" name="active" checked> Active (claimable at a register)</label></div>
     <div class="modal-actions">
       <button type="button" class="op-btn secondary" data-close>Cancel</button>
       <button class="op-btn">Save</button>
@@ -131,9 +156,11 @@
   let pages = [];            // builder view: all pages + buttons
   let products = [];         // full back-office product list
   let groups = null;         // null = groups module unavailable
+  let terminals = [];        // registry + assigned page ids
   let selectedId = null;
   let editingPage = null;    // page being edited in the page modal (null = new)
   let editingButton = null;  // button being edited (null = new)
+  let editingTerminal = null; // terminal being edited (null = new)
 
   document.querySelectorAll('[data-close]').forEach((b) => {
     b.onclick = () => b.closest('dialog').close();
@@ -142,7 +169,10 @@
   const selected = () => pages.find((p) => p.id === selectedId) || null;
 
   async function reload() {
-    pages = (await op.api('/api/menus/pages')).pages;
+    [pages, terminals] = await Promise.all([
+      op.api('/api/menus/pages').then((r) => r.pages),
+      op.api('/api/menus/terminals/all').then((r) => r.terminals),
+    ]);
     if (selectedId && !selected()) selectedId = null;
     if (!selectedId && pages.length) selectedId = pages[0].id;
     render();
@@ -158,8 +188,76 @@
     document.querySelectorAll('.page-row').forEach((el) => {
       el.onclick = () => { selectedId = Number(el.dataset.id); render(); };
     });
+    renderTerminals();
     renderButtons();
   }
+
+  // ---- terminals panel ----
+  function renderTerminals() {
+    $('#terminal-list').innerHTML = terminals.length ? terminals.map((t) => `
+      <div class="term-card" data-id="${t.id}">
+        <div class="term-head">
+          <div class="nm">${esc(t.name)}<small>${t.page_ids.length
+            ? t.page_ids.length + ' page(s) assigned'
+            : 'default menu'}</small></div>
+          ${t.active ? '<span class="op-badge ok">active</span>' : '<span class="op-badge err">inactive</span>'}
+          <button class="op-btn secondary" data-edit-term="${t.id}">Edit</button>
+        </div>
+        <div class="term-pages">
+          ${pages.length ? pages.map((p) => `
+            <label><input type="checkbox" data-page="${p.id}" ${t.page_ids.includes(p.id) ? 'checked' : ''}>
+              ${esc(p.name)}${p.active ? '' : ' <span class="op-muted">(inactive)</span>'}</label>`).join('')
+            : '<span class="op-muted">No pages to assign yet.</span>'}
+        </div>
+        <div class="op-right"><button class="op-btn secondary" data-save-term="${t.id}">Save assignment</button></div>
+      </div>`).join('')
+      : '<p class="op-muted">No terminals yet — every register shows the default menu.</p>';
+    document.querySelectorAll('[data-edit-term]').forEach((el) => {
+      el.onclick = () => openTerminal(terminals.find((t) => t.id === Number(el.dataset.editTerm)));
+    });
+    document.querySelectorAll('[data-save-term]').forEach((el) => {
+      el.onclick = () => saveAssignment(Number(el.dataset.saveTerm));
+    });
+  }
+
+  async function saveAssignment(termId) {
+    const card = document.querySelector(`.term-card[data-id="${termId}"]`);
+    const page_ids = [...card.querySelectorAll('input[data-page]:checked')]
+      .map((el) => Number(el.dataset.page));
+    try {
+      await op.api(`/api/menus/terminals/${termId}/pages`, { method: 'PUT', body: { page_ids } });
+      op.toast(page_ids.length
+        ? `Assigned ${page_ids.length} page(s)`
+        : 'Assignment cleared — terminal shows the default menu', 'ok');
+      await reload();
+    } catch { /* toast shown */ }
+  }
+
+  function openTerminal(term) {
+    editingTerminal = term || null;
+    const f = $('#terminal-form');
+    $('#terminal-modal-title').textContent = term ? `Edit ${term.name}` : 'New terminal';
+    f.name.value = term?.name ?? '';
+    f.active.checked = term ? !!term.active : true;
+    $('#terminal-modal').showModal();
+  }
+  $('#btn-new-terminal').onclick = () => openTerminal(null);
+
+  $('#terminal-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.currentTarget;
+    const body = { name: f.name.value, active: f.active.checked ? 1 : 0 };
+    try {
+      if (editingTerminal) {
+        await op.api(`/api/menus/terminals/${editingTerminal.id}`, { method: 'PUT', body });
+      } else {
+        await op.api('/api/menus/terminals', { body });
+      }
+      op.toast('Terminal saved', 'ok');
+      $('#terminal-modal').close();
+      await reload();
+    } catch { /* toast shown */ }
+  });
 
   // ---- buttons panel ----
   function targetOf(b) {

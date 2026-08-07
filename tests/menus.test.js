@@ -309,6 +309,256 @@ test('menus: validation', async (t) => {
   });
 });
 
+test('menus: per-terminal assignment', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const manager = await login(base, 'manager');
+  const cashier = await login(base, 'cashier');
+  const { adult, child } = await seededProducts(manager);
+
+  // Tickets (with a link to Food) + Food — the default menu shows both.
+  const tickets = (await manager('POST', '/api/menus/pages', { name: 'Tickets', sort: 1 })).data.page;
+  const food = (await manager('POST', '/api/menus/pages', { name: 'Food', sort: 2 })).data.page;
+  await manager('POST', `/api/menus/pages/${tickets.id}/buttons`, { product_id: adult.id, position: 1 });
+  await manager('POST', `/api/menus/pages/${tickets.id}/buttons`, {
+    link_page_id: food.id, position: 2, label: 'Food…',
+  });
+  await manager('POST', `/api/menus/pages/${food.id}/buttons`, { product_id: child.id, position: 1 });
+
+  let cafe, gate;
+
+  await t.test('create terminals and assign page sets', async () => {
+    const r = await manager('POST', '/api/menus/terminals', { name: 'Café' });
+    assert.equal(r.status, 200);
+    cafe = r.data.terminal;
+    assert.deepEqual(cafe.page_ids, []);
+    gate = (await manager('POST', '/api/menus/terminals', { name: 'Front Gate' })).data.terminal;
+    const put = await manager('PUT', `/api/menus/terminals/${cafe.id}/pages`, { page_ids: [food.id] });
+    assert.equal(put.status, 200);
+    assert.deepEqual(put.data.terminal.page_ids, [food.id]);
+    const all = (await manager('GET', '/api/menus/terminals/all')).data.terminals;
+    assert.deepEqual(all.find((x) => x.id === cafe.id).page_ids, [food.id]);
+  });
+
+  await t.test('claimed terminal sees only its assigned pages; unclaimed sees both', async () => {
+    const claimed = await cashier('GET', `/api/menus/active?terminal=${cafe.id}`);
+    assert.equal(claimed.status, 200);
+    assert.deepEqual(claimed.data.pages.map((p) => p.name), ['Food']);
+    assert.deepEqual(claimed.data.pages[0].buttons.map((b) => b.product_id), [child.id]);
+    const unclaimed = await cashier('GET', '/api/menus/active');
+    assert.deepEqual(unclaimed.data.pages.map((p) => p.name), ['Tickets', 'Food']);
+  });
+
+  await t.test('terminals present but none claimed keeps the frozen zero-arg contract', async () => {
+    const r = await cashier('GET', '/api/menus/active');
+    assert.deepEqual(getActiveMenu(db), r.data);
+  });
+
+  await t.test('pure getActiveMenu(db, id) matches the ?terminal payload', async () => {
+    const r = await cashier('GET', `/api/menus/active?terminal=${cafe.id}`);
+    assert.deepEqual(getActiveMenu(db, cafe.id), r.data);
+  });
+
+  await t.test('fall-through matrix: every bad claim yields the default menu, never an error', async () => {
+    const baseline = (await cashier('GET', '/api/menus/active')).data;
+    const cases = [
+      String(gate.id), // exists but unassigned
+      '999999', // nonexistent
+      'abc', '0', '-1', '1.5', '', '9'.repeat(300), // garbage
+    ];
+    for (const v of cases) {
+      const r = await cashier('GET', `/api/menus/active?terminal=${encodeURIComponent(v)}`);
+      assert.equal(r.status, 200, `terminal=${v}`);
+      assert.deepEqual(r.data, baseline, `terminal=${v} falls through`);
+    }
+    // deactivated terminal falls through too
+    await manager('PUT', `/api/menus/terminals/${cafe.id}`, { active: 0 });
+    const r = await cashier('GET', `/api/menus/active?terminal=${cafe.id}`);
+    assert.deepEqual(r.data, baseline);
+    await manager('PUT', `/api/menus/terminals/${cafe.id}`, { active: 1 });
+  });
+
+  await t.test('link buttons to unassigned pages are pruned as dead links', async () => {
+    await manager('PUT', `/api/menus/terminals/${gate.id}/pages`, { page_ids: [tickets.id] });
+    const r = await cashier('GET', `/api/menus/active?terminal=${gate.id}`);
+    assert.deepEqual(r.data.pages.map((p) => p.name), ['Tickets']);
+    assert.ok(!r.data.pages[0].buttons.some((b) => b.link_page_id === food.id));
+  });
+
+  await t.test('inactive assigned page is omitted; all-inactive -> empty pages (auto-grid)', async () => {
+    await manager('PUT', `/api/menus/pages/${food.id}`, { active: 0 });
+    const r = await cashier('GET', `/api/menus/active?terminal=${cafe.id}`);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.data.pages, []);
+    await manager('PUT', `/api/menus/pages/${food.id}`, { active: 1 });
+  });
+
+  await t.test('replace-set is idempotent and last write wins', async () => {
+    await manager('PUT', `/api/menus/terminals/${cafe.id}/pages`, { page_ids: [food.id] });
+    await manager('PUT', `/api/menus/terminals/${cafe.id}/pages`, { page_ids: [food.id] });
+    const n = db.prepare('SELECT COUNT(*) AS n FROM terminal_menu_pages WHERE terminal_id = ?')
+      .get(cafe.id).n;
+    assert.equal(n, 1);
+    await manager('PUT', `/api/menus/terminals/${cafe.id}/pages`, { page_ids: [tickets.id, food.id] });
+    await manager('PUT', `/api/menus/terminals/${cafe.id}/pages`, { page_ids: [food.id] });
+    const final = (await manager('GET', '/api/menus/terminals/all')).data.terminals
+      .find((x) => x.id === cafe.id);
+    assert.deepEqual(final.page_ids, [food.id]);
+  });
+
+  await t.test('deleting an assigned page cleans its assignment rows (FKs on)', async () => {
+    const del = await manager('DELETE', `/api/menus/pages/${food.id}`);
+    assert.equal(del.status, 200);
+    const left = db.prepare('SELECT COUNT(*) AS n FROM terminal_menu_pages WHERE page_id = ?')
+      .get(food.id).n;
+    assert.equal(left, 0);
+    const r = await cashier('GET', `/api/menus/active?terminal=${cafe.id}`);
+    assert.equal(r.status, 200); // café now unassigned -> default menu
+    assert.deepEqual(r.data, getActiveMenu(db));
+  });
+});
+
+test('menus: terminal CRUD validation and authz', async (t) => {
+  const { server, db, base } = await startServer();
+  t.after(() => server.close());
+  const manager = await login(base, 'manager');
+  const cashier = await login(base, 'cashier');
+  const anon = client(base);
+  const page = (await manager('POST', '/api/menus/pages', { name: 'P1' })).data.page;
+  const term = (await manager('POST', '/api/menus/terminals', { name: 'Kiosk' })).data.terminal;
+
+  await t.test('name required, trimmed, capped', async () => {
+    assert.equal((await manager('POST', '/api/menus/terminals', { name: '   ' })).status, 400);
+    assert.equal((await manager('POST', '/api/menus/terminals', {})).status, 400);
+    assert.equal((await manager('POST', '/api/menus/terminals', { name: 'x'.repeat(81) })).status, 400);
+  });
+
+  await t.test('duplicate name -> 409 name_taken (create and rename)', async () => {
+    const dup = await manager('POST', '/api/menus/terminals', { name: 'Kiosk' });
+    assert.equal(dup.status, 409);
+    assert.equal(dup.data.error, 'name_taken');
+    const other = (await manager('POST', '/api/menus/terminals', { name: 'Kiosk 2' })).data.terminal;
+    const ren = await manager('PUT', `/api/menus/terminals/${other.id}`, { name: 'Kiosk' });
+    assert.equal(ren.status, 409);
+    assert.equal(ren.data.error, 'name_taken');
+  });
+
+  await t.test('rename and deactivate; unknown terminal 404', async () => {
+    const r = await manager('PUT', `/api/menus/terminals/${term.id}`, { name: 'Kiosk A', active: 0 });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.terminal.name, 'Kiosk A');
+    assert.equal(r.data.terminal.active, 0);
+    // inactive terminals leave the public claim list but stay in the builder list
+    const pub = (await cashier('GET', '/api/menus/terminals')).data.terminals;
+    assert.ok(!pub.some((x) => x.id === term.id));
+    const all = (await manager('GET', '/api/menus/terminals/all')).data.terminals;
+    assert.ok(all.some((x) => x.id === term.id));
+    await manager('PUT', `/api/menus/terminals/${term.id}`, { active: 1 });
+    assert.equal((await manager('PUT', '/api/menus/terminals/999999', { name: 'X' })).status, 404);
+    assert.equal((await manager('PUT', '/api/menus/terminals/abc', { name: 'X' })).status, 400);
+  });
+
+  await t.test('page_ids validation: shape, duplicates, unknown ids — no partial writes', async () => {
+    await manager('PUT', `/api/menus/terminals/${term.id}/pages`, { page_ids: [page.id] });
+    const before = db.prepare('SELECT COUNT(*) AS n FROM terminal_menu_pages').get().n;
+    const bads = [
+      { page_ids: 'nope' },
+      {},
+      { page_ids: [page.id, 'abc'] },
+      { page_ids: [page.id, 1.5] },
+      { page_ids: [page.id, 0] },
+      { page_ids: [page.id, 999999] },
+      { page_ids: [page.id, page.id] },
+      { page_ids: Array.from({ length: 201 }, (_, i) => i + 1) },
+    ];
+    for (const body of bads) {
+      const r = await manager('PUT', `/api/menus/terminals/${term.id}/pages`, body);
+      assert.equal(r.status, 400, JSON.stringify(body).slice(0, 60));
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM terminal_menu_pages').get().n, before);
+    }
+    // empty array clears the assignment (back to the default menu)
+    const clear = await manager('PUT', `/api/menus/terminals/${term.id}/pages`, { page_ids: [] });
+    assert.equal(clear.status, 200);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM terminal_menu_pages').get().n, 0);
+  });
+
+  await t.test('authz: anon 401 everywhere; cashier read-only', async () => {
+    assert.equal((await anon('GET', '/api/menus/terminals')).status, 401);
+    assert.equal((await anon('GET', '/api/menus/terminals/all')).status, 401);
+    assert.equal((await anon('POST', '/api/menus/terminals', { name: 'X' })).status, 401);
+    assert.equal((await anon('PUT', `/api/menus/terminals/${term.id}`, { name: 'X' })).status, 401);
+    assert.equal((await anon('PUT', `/api/menus/terminals/${term.id}/pages`, { page_ids: [] })).status, 401);
+    assert.equal((await cashier('GET', '/api/menus/terminals')).status, 200);
+    assert.equal((await cashier('GET', '/api/menus/terminals/all')).status, 403);
+    assert.equal((await cashier('POST', '/api/menus/terminals', { name: 'X' })).status, 403);
+    assert.equal((await cashier('PUT', `/api/menus/terminals/${term.id}`, { name: 'X' })).status, 403);
+    assert.equal((await cashier('PUT', `/api/menus/terminals/${term.id}/pages`, { page_ids: [] })).status, 403);
+  });
+
+  await t.test('claim list leaks nothing beyond id and name', async () => {
+    const r = await cashier('GET', '/api/menus/terminals');
+    for (const x of r.data.terminals) assert.deepEqual(Object.keys(x).sort(), ['id', 'name']);
+  });
+
+  await t.test('hostile terminal name round-trips as inert JSON data', async () => {
+    const evil = `<img src=x onerror=alert(1)>'--`;
+    const r = await manager('POST', '/api/menus/terminals', { name: evil });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.terminal.name, evil);
+    const pub = (await cashier('GET', '/api/menus/terminals')).data.terminals;
+    assert.equal(pub.find((x) => x.id === r.data.terminal.id).name, evil);
+  });
+});
+
+test('menus: a crafted terminal claim cannot widen product or price exposure', async (t) => {
+  const { server, base } = await startServer();
+  t.after(() => server.close());
+  const manager = await login(base, 'manager');
+  const cashier = await login(base, 'cashier');
+  const { adult, child } = await seededProducts(manager);
+
+  const p1 = (await manager('POST', '/api/menus/pages', { name: 'A', sort: 1 })).data.page;
+  const p2 = (await manager('POST', '/api/menus/pages', { name: 'B', sort: 2 })).data.page;
+  await manager('POST', `/api/menus/pages/${p1.id}/buttons`, { product_id: adult.id });
+  await manager('POST', `/api/menus/pages/${p2.id}/buttons`, { product_id: child.id });
+  const cafe = (await manager('POST', '/api/menus/terminals', { name: 'Café' })).data.terminal;
+  await manager('PUT', `/api/menus/terminals/${cafe.id}/pages`, { page_ids: [p2.id] });
+
+  const exposure = (menu) => {
+    const m = new Map();
+    for (const pg of menu.pages) {
+      for (const b of pg.buttons) if (b.product_id != null) m.set(b.product_id, b.product.price_cents);
+    }
+    return m;
+  };
+  const baseline = exposure((await cashier('GET', '/api/menus/active')).data);
+
+  for (const v of [String(cafe.id), '1', '2', '999999', '0', '-1', 'abc']) {
+    const r = await cashier('GET', `/api/menus/active?terminal=${v}`);
+    assert.equal(r.status, 200);
+    const seen = exposure(r.data);
+    for (const [pid, price] of seen) {
+      assert.ok(baseline.has(pid), `terminal=${v} exposed product ${pid} outside the default menu`);
+      assert.equal(price, baseline.get(pid), `terminal=${v} changed price of product ${pid}`);
+    }
+  }
+
+  // sale parity: an order built off a terminal-menu button is identical to auto-grid
+  const menu = (await cashier('GET', `/api/menus/active?terminal=${cafe.id}`)).data;
+  const btn = menu.pages[0].buttons[0];
+  const mkOrder = (pid) => cashier('POST', '/api/pos/orders', { lines: [{ product_id: pid, qty: 2 }] });
+  const viaTerminal = await mkOrder(btn.product_id);
+  const viaGrid = await mkOrder(child.id);
+  assert.equal(viaTerminal.status, 200);
+  for (const k of ['subtotal_cents', 'tax_cents', 'discount_cents', 'total_cents']) {
+    assert.equal(viaTerminal.data.order[k], viaGrid.data.order[k], k);
+  }
+  assert.equal(
+    viaTerminal.data.order.lines[0].description,
+    viaGrid.data.order.lines[0].description
+  );
+});
+
 test('menus: generate from group and from catalog', async (t) => {
   const { server, base, ctx } = await startServer();
   t.after(() => server.close());

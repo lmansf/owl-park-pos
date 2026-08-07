@@ -6,12 +6,24 @@
 <title>POS — Owl Park POS</title>
 <link rel="stylesheet" href="/shell.css">
 <style>
-  .pos-tabs { display: flex; gap: 8px; margin: 0 0 16px; }
+  .pos-tabs { display: flex; gap: 8px; margin: 0 0 16px; flex-wrap: wrap; align-items: center; }
   .pos-tabs button {
     background: var(--panel-2); color: var(--muted); border: 1px solid var(--line);
     border-radius: 8px; padding: 10px 20px; font: inherit; font-weight: 600; cursor: pointer;
   }
   .pos-tabs button.active { color: #fff; border-color: var(--accent); background: var(--panel); }
+  .pos-tabs button.pos-terminal {
+    margin-left: auto; padding: 8px 14px; font-weight: 500; font-size: 13px;
+    border-style: dashed; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pos-tabs button.pos-terminal:disabled { cursor: default; opacity: .8; }
+  .term-row {
+    display: block; width: 100%; min-height: 44px; text-align: left; margin-bottom: 8px;
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 8px; padding: 10px 12px; font: inherit; cursor: pointer;
+  }
+  .term-row:hover { border-color: var(--accent); }
+  .term-row.current { border-color: var(--accent); font-weight: 700; }
 
   .pos-sell { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; }
   .pos-kind h3 { margin: 14px 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
@@ -134,6 +146,7 @@
   <div class="pos-tabs no-print">
     <button id="tab-sell" class="active">Sell</button>
     <button id="tab-orders">Orders</button>
+    <button id="btn-terminal" class="pos-terminal" hidden></button>
   </div>
 
   <!-- SELL -->
@@ -180,6 +193,16 @@
     <div id="receipt"></div>
   </section>
 </main>
+
+<dialog class="op-modal" id="dlg-terminal">
+  <h2>Switch terminal</h2>
+  <p class="op-muted">The claimed terminal picks which menu layout this register shows.
+    Prices and permissions never change with the terminal.</p>
+  <div id="term-list" style="max-height:50vh; overflow:auto"></div>
+  <div class="op-right" style="margin-top:12px">
+    <button class="op-btn secondary" id="term-cancel">Cancel</button>
+  </div>
+</dialog>
 
 <dialog class="op-modal" id="dlg-session">
   <h2 id="sess-title">Pick a session</h2>
@@ -304,10 +327,59 @@
   let menuPages = [];
   let currentPageId = null;
 
+  // ---------- terminal claim ----------
+  // A browser claims a terminal identity once (localStorage); the server then
+  // serves that terminal's assigned menu. Any bad/stale claim falls through to
+  // the default menu server-side — the claim is a layout hint, never a gate:
+  // it cannot change prices, products, or permissions. Switching is offered to
+  // managers; cashiers see the claimed name read-only.
+  let terminal = null;
+  try { terminal = JSON.parse(localStorage.getItem('op_terminal') || 'null'); } catch { terminal = null; }
+  if (!terminal || !Number.isInteger(terminal.id) || terminal.id <= 0 || typeof terminal.name !== 'string') {
+    terminal = null;
+  }
+
+  function renderTerminalChip() {
+    const b = $('btn-terminal');
+    b.hidden = false;
+    b.textContent = terminal ? terminal.name : 'Default menu';
+    b.disabled = !isManager;
+    b.title = isManager
+      ? 'Switch which menu this register shows'
+      : 'Terminal (a manager can switch it)';
+  }
+
+  const dlgTerm = $('dlg-terminal');
+  $('term-cancel').onclick = () => dlgTerm.close();
+  async function pickTerminal() {
+    let terminals = [];
+    try { terminals = (await op.api('/api/menus/terminals')).terminals; } catch { terminals = []; }
+    const rows = [{ id: null, name: 'No terminal — default menu' }, ...terminals];
+    $('term-list').innerHTML = rows.map((t, i) => `
+      <button class="term-row ${(t.id ?? null) === (terminal?.id ?? null) ? 'current' : ''}" data-i="${i}">
+        ${esc(t.name)}</button>`).join('');
+    for (const b of $('term-list').querySelectorAll('.term-row')) {
+      b.onclick = async () => {
+        const t = rows[Number(b.dataset.i)];
+        terminal = t.id === null ? null : { id: t.id, name: t.name };
+        if (terminal) localStorage.setItem('op_terminal', JSON.stringify(terminal));
+        else localStorage.removeItem('op_terminal');
+        dlgTerm.close();
+        currentPageId = null;
+        renderTerminalChip();
+        await loadProducts();
+        op.toast(terminal ? `Terminal: ${terminal.name}` : 'Back to the default menu', 'ok');
+      };
+    }
+    dlgTerm.showModal();
+  }
+  $('btn-terminal').onclick = () => { if (isManager) pickTerminal(); };
+
   async function loadProducts() {
     products = (await op.api('/api/catalog/sellable?channel=pos')).products;
     let pages = [];
-    try { pages = (await op.api('/api/menus/active')).pages || []; } catch { pages = []; }
+    const menuUrl = '/api/menus/active' + (terminal ? '?terminal=' + terminal.id : '');
+    try { pages = (await op.api(menuUrl)).pages || []; } catch { pages = []; }
     const sellable = new Set(products.map((p) => p.id));
     // keep link buttons; keep product buttons only for products in the pos feed
     menuPages = pages.map((pg) => ({
@@ -891,6 +963,7 @@
   $('order-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchOrders(); });
 
   // ---------- boot ----------
+  renderTerminalChip();
   await Promise.all([loadProducts(), loadTenders()]);
   renderCart();
 })();

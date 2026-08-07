@@ -11,11 +11,26 @@ const ROLES = ['admin', 'manager'];
 // Active menu: active pages with their active buttons in position order.
 // Product buttons carry a product join; buttons for inactive products and
 // link buttons whose target page is missing/inactive are omitted.
-function getActiveMenu(db) {
-  const pages = db
+// With a terminal id, the page set narrows to that terminal's assignment
+// (assigned ∩ active); link buttons to unassigned pages drop as dead links.
+// Any other case — no/invalid terminal, unknown, inactive, or unassigned
+// terminal — resolves exactly like the zero-argument call (frozen contract).
+function getActiveMenu(db, terminalId) {
+  let assigned = null;
+  if (Number.isInteger(terminalId) && terminalId > 0) {
+    const term = db.prepare('SELECT active FROM terminals WHERE id = ?').get(terminalId);
+    if (term && term.active) {
+      const rows = db
+        .prepare('SELECT page_id FROM terminal_menu_pages WHERE terminal_id = ?')
+        .all(terminalId);
+      if (rows.length) assigned = new Set(rows.map((r) => r.page_id));
+    }
+  }
+  let pages = db
     .prepare('SELECT id, name, sort FROM menu_pages WHERE active = 1 ORDER BY sort, id')
     .all()
     .map((p) => ({ ...p, buttons: [] }));
+  if (assigned) pages = pages.filter((p) => assigned.has(p.id));
   const activeIds = new Set(pages.map((p) => p.id));
   const byPage = new Map(pages.map((p) => [p.id, p]));
   const rows = db
@@ -95,6 +110,35 @@ function mustButton(db, id) {
     .get(toInt(id, 'id', { min: 1 }));
   if (!btn) throw new ApiError(404, 'not_found', 'No such menu button');
   return btn;
+}
+
+const TERMINAL_NAME_MAX = 80;
+const ASSIGNMENT_MAX = 200;
+
+function terminalName(v) {
+  const name = String(v ?? '').trim();
+  if (!name) throw bad('name is required');
+  if (name.length > TERMINAL_NAME_MAX) {
+    throw bad(`name must be ${TERMINAL_NAME_MAX} characters or fewer`);
+  }
+  return name;
+}
+
+function mustTerminal(db, id) {
+  const term = db
+    .prepare('SELECT * FROM terminals WHERE id = ?')
+    .get(toInt(id, 'id', { min: 1 }));
+  if (!term) throw new ApiError(404, 'not_found', 'No such terminal');
+  return term;
+}
+
+// node:sqlite surfaces constraint failures as generic errors — map the
+// UNIQUE(name) race to a 409 instead of leaking a raw 500.
+function rethrowNameTaken(err, name) {
+  if (/UNIQUE/i.test(err?.message ?? '')) {
+    throw new ApiError(409, 'name_taken', `A terminal named "${name}" already exists`);
+  }
+  throw err;
 }
 
 function nextPosition(db, pageId) {
@@ -189,8 +233,84 @@ function builderPages(db) {
 function mount(router, ctx) {
   const db = ctx.db;
 
-  // POS feed: what the terminal renders. Any signed-in role.
-  router.get('/api/menus/active', [], () => getActiveMenu(db));
+  // POS feed: what the terminal renders. Any signed-in role. The optional
+  // ?terminal= narrows to that terminal's assigned pages; anything invalid
+  // falls through to the default menu — selling is never blocked here.
+  router.get('/api/menus/active', [], (req) => {
+    const t = Number(req.query.terminal);
+    return getActiveMenu(db, Number.isInteger(t) && t > 0 ? t : undefined);
+  });
+
+  // Claim picker: names of active terminals only — no assignment details.
+  router.get('/api/menus/terminals', [], () => ({
+    terminals: db
+      .prepare('SELECT id, name FROM terminals WHERE active = 1 ORDER BY name, id')
+      .all(),
+  }));
+
+  // Builder view: every terminal (including inactive) with assigned page ids.
+  router.get('/api/menus/terminals/all', ROLES, () => {
+    const terminals = db
+      .prepare('SELECT * FROM terminals ORDER BY name, id')
+      .all()
+      .map((t) => ({ ...t, page_ids: [] }));
+    const byId = new Map(terminals.map((t) => [t.id, t]));
+    const rows = db
+      .prepare('SELECT terminal_id, page_id FROM terminal_menu_pages ORDER BY page_id')
+      .all();
+    for (const r of rows) byId.get(r.terminal_id)?.page_ids.push(r.page_id);
+    return { terminals };
+  });
+
+  router.post('/api/menus/terminals', ROLES, (req) => {
+    const name = terminalName(req.body?.name);
+    let id;
+    try {
+      id = Number(db.prepare('INSERT INTO terminals (name) VALUES (?)').run(name).lastInsertRowid);
+    } catch (err) {
+      rethrowNameTaken(err, name);
+    }
+    audit(db, req.user.id, 'menus.terminal.create', { id, name });
+    return { terminal: { ...db.prepare('SELECT * FROM terminals WHERE id = ?').get(id), page_ids: [] } };
+  });
+
+  // Rename / deactivate. No delete route: terminals are deactivated, matching
+  // the create/rename/deactivate contract (history stays intact).
+  router.put('/api/menus/terminals/:id', ROLES, (req) => {
+    const existing = mustTerminal(db, req.params.id);
+    const name = terminalName(req.body?.name ?? existing.name);
+    const active = toBit(req.body?.active ?? existing.active);
+    try {
+      db.prepare('UPDATE terminals SET name = ?, active = ? WHERE id = ?').run(name, active, existing.id);
+    } catch (err) {
+      rethrowNameTaken(err, name);
+    }
+    audit(db, req.user.id, 'menus.terminal.update', { id: existing.id, name, active });
+    return { terminal: db.prepare('SELECT * FROM terminals WHERE id = ?').get(existing.id) };
+  });
+
+  // Replace-set page assignment (mirrors PUT /api/groups/:id/products).
+  // An empty array clears the assignment — the terminal falls back to the
+  // default menu. Validated fully before the transactional swap.
+  router.put('/api/menus/terminals/:id/pages', ROLES, (req) => {
+    const term = mustTerminal(db, req.params.id);
+    const raw = req.body?.page_ids;
+    if (!Array.isArray(raw)) throw bad('page_ids must be an array');
+    if (raw.length > ASSIGNMENT_MAX) throw bad(`page_ids cannot exceed ${ASSIGNMENT_MAX} entries`);
+    const ids = raw.map((v) => toInt(v, 'page_ids[]', { min: 1 }));
+    if (new Set(ids).size !== ids.length) throw bad('page_ids contains duplicates');
+    const exists = db.prepare('SELECT id FROM menu_pages WHERE id = ?');
+    for (const pid of ids) {
+      if (!exists.get(pid)) throw bad(`page_ids ${pid} does not exist`);
+    }
+    tx(db, () => {
+      db.prepare('DELETE FROM terminal_menu_pages WHERE terminal_id = ?').run(term.id);
+      const insert = db.prepare('INSERT INTO terminal_menu_pages (terminal_id, page_id) VALUES (?, ?)');
+      for (const pid of ids) insert.run(term.id, pid);
+    });
+    audit(db, req.user.id, 'menus.terminal.assign', { id: term.id, page_ids: ids });
+    return { terminal: { ...term, page_ids: ids } };
+  });
 
   // Builder view: every page and button, including inactive ones.
   router.get('/api/menus/pages', ROLES, () => ({ pages: builderPages(db) }));
@@ -214,8 +334,9 @@ function mount(router, ctx) {
     return { page: db.prepare('SELECT * FROM menu_pages WHERE id = ?').get(existing.id) };
   });
 
-  // Deleting a page removes its buttons AND any link buttons targeting it
-  // (referential safety — confirmation happens in the builder UI).
+  // Deleting a page removes its buttons, any link buttons targeting it, and
+  // any terminal assignments of it (referential safety with FKs ON —
+  // confirmation happens in the builder UI).
   router.del('/api/menus/pages/:id', ROLES, (req) => {
     const page = mustPage(db, req.params.id);
     let removed = 0;
@@ -223,6 +344,7 @@ function mount(router, ctx) {
       removed = db
         .prepare('DELETE FROM menu_buttons WHERE page_id = ? OR link_page_id = ?')
         .run(page.id, page.id).changes;
+      db.prepare('DELETE FROM terminal_menu_pages WHERE page_id = ?').run(page.id);
       db.prepare('DELETE FROM menu_pages WHERE id = ?').run(page.id);
     });
     audit(db, req.user.id, 'menus.page.delete', { id: page.id, name: page.name, removed_buttons: removed });
