@@ -62,7 +62,19 @@ function checkTicket(db, t, at) {
     display_name: t.holder_name || t.product_name,
   };
   const deny = (reason, detail) => ({ ...base, result: 'denied', reason, detail });
-  if (t.status === 'void') return deny('void', 'Ticket has been voided');
+  if (t.status === 'void') {
+    // same 'void' reason either way (reports bucket on it); the detail tells the
+    // gate operator when the guest holds a replacement from an exchange
+    const replacement = db
+      .prepare('SELECT code FROM tickets WHERE exchanged_from = ?')
+      .get(t.id);
+    return deny(
+      'void',
+      replacement
+        ? 'Ticket was exchanged — the guest holds a new ticket for another session'
+        : 'Ticket has been voided'
+    );
+  }
   if (t.status === 'used' || t.uses_remaining <= 0) return deny('exhausted', 'No uses remaining');
   const nowMs = Date.parse(at);
   if (nowMs < Date.parse(t.valid_from)) {

@@ -2,7 +2,8 @@
 // End-to-end smoke: boots a scratch server + DB and walks the full business loop:
 // POS sale (split tender, discount, timed session) → gate scans (ok / double / refund-void)
 // → web order (approve + decline + recovery) → membership sell + renew + scan
-// → full refund → reports reconcile. Exits non-zero on any failed assertion.
+// → full refund → partial refund + session exchange → reports reconcile.
+// Exits non-zero on any failed assertion.
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -171,6 +172,67 @@ async function main() {
     && vFin.data.order.payments[0].ref === 'VOUCHER',
     'voucher payment finalizes through the shared posting path');
 
+  console.log('— partial refund + exchange —');
+  const approver = { username: 'manager', password: 'manager' };
+  const sessNow = (await anon('GET', `/api/events/${plntm.event_id}/sessions`)).data.sessions;
+  const sA = sessNow.find((s) => !s.sold_out);
+  const sB = sessNow.find((s) => !s.sold_out && s.id !== sA.id);
+  ok(sA && sB, 'two open sessions available for the exchange walk');
+  const po = (await cashier('POST', '/api/pos/orders', {
+    lines: [
+      { product_id: adult.id, qty: 2 },
+      { product_id: plntm.id, qty: 3, event_session_id: sA.id },
+    ],
+    customer: { name: 'Partial Pat', email: 'pat@example.com' },
+  })).data.order;
+  const pfin = await cashier('POST', `/api/pos/orders/${po.id}/finalize`, {
+    payments: [{ method: 'cash', amount_cents: po.total_cents }],
+  });
+  ok(pfin.status === 200, '3-ticket timed order finalizes');
+  const soldA1 = (await anon('GET', `/api/events/${plntm.event_id}/sessions`)).data.sessions
+    .find((s) => s.id === sA.id).sold;
+  const adultLine = po.lines.find((l) => l.sku === 'ADULT');
+  const plntmLine = po.lines.find((l) => l.sku === 'PLNTM');
+  const pref = await manager('POST', `/api/pos/orders/${po.id}/refund`, {
+    approver,
+    lines: [
+      { order_line_id: adultLine.id, qty: 1 },
+      { order_line_id: plntmLine.id, qty: 1 },
+    ],
+  });
+  ok(pref.status === 200 && pref.data.order.status === 'partial_refund',
+    'per-line refund leaves the order partial_refund');
+  const soldA2 = (await anon('GET', `/api/events/${plntm.event_id}/sessions`)).data.sessions
+    .find((s) => s.id === sA.id).sold;
+  ok(soldA2 === soldA1 - 1, 'partial refund released exactly one session seat');
+  const pAdult = pref.data.order.tickets.filter((tk) => tk.order_line_id === adultLine.id);
+  const scanPartVoid = await gate('POST', '/api/admissions/scan',
+    { code: pAdult.find((tk) => tk.status === 'void').code, gate: 'main' });
+  ok(scanPartVoid.data.result === 'denied' && scanPartVoid.data.reason === 'void',
+    'refunded ticket of a partial refund scans denied: void');
+  const scanSibling = await gate('POST', '/api/admissions/scan',
+    { code: pAdult.find((tk) => tk.status === 'valid').code, gate: 'main' });
+  ok(scanSibling.data.result === 'ok', 'sibling ticket of a partial refund still admits');
+
+  const survivor = pref.data.order.tickets.find(
+    (tk) => tk.order_line_id === plntmLine.id && tk.status === 'valid');
+  const soldB1 = (await anon('GET', `/api/events/${plntm.event_id}/sessions`)).data.sessions
+    .find((s) => s.id === sB.id).sold;
+  const exch = await manager('POST', `/api/pos/tickets/${survivor.id}/exchange`, {
+    approver, event_session_id: sB.id,
+  });
+  ok(exch.status === 200 && exch.data.ticket.exchanged_from === survivor.id,
+    'exchange voids the old ticket and links the reissue');
+  const sessAfterExch = (await anon('GET', `/api/events/${plntm.event_id}/sessions`)).data.sessions;
+  ok(sessAfterExch.find((s) => s.id === sA.id).sold === soldA2 - 1
+    && sessAfterExch.find((s) => s.id === sB.id).sold === soldB1 + 1,
+    'exchange moved one seat from the old session to the new');
+  const scanExchOld = await gate('POST', '/api/admissions/scan', { code: survivor.code, gate: 'main' });
+  ok(scanExchOld.data.result === 'denied' && scanExchOld.data.reason === 'void',
+    'exchanged-away code scans denied: void');
+  ok(db.prepare('SELECT status FROM tickets WHERE id = ?').get(exch.data.ticket.id).status === 'valid',
+    'replacement ticket is valid in the new session');
+
   console.log('— reports reconcile —');
   const today = new Date();
   const d = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
@@ -183,7 +245,16 @@ async function main() {
   passed++; console.log('  ✔ net = gross − discounts on every row');
   const payTotal = db.prepare('SELECT COALESCE(SUM(amount_cents - change_cents),0) AS s FROM payments').get().s;
   const paidTotal = db.prepare("SELECT COALESCE(SUM(total_cents),0) AS s FROM orders WHERE status='paid'").get().s;
-  ok(payTotal === paidTotal, 'payments (net of change; refunds cancel out) equal currently-paid order totals');
+  // partially refunded orders contribute their unrefunded remainder
+  const partialNet = db.prepare(
+    `SELECT COALESCE(SUM(o.total_cents), 0)
+          - COALESCE((SELECT SUM(r.total_cents) FROM refunds r
+                      JOIN orders po ON po.id = r.order_id
+                      WHERE po.status = 'partial_refund'), 0) AS s
+     FROM orders o WHERE o.status = 'partial_refund'`
+  ).get().s;
+  ok(payTotal === paidTotal + partialNet,
+    'payments (net of change; refunds cancel out) equal live order totals incl. partial remainders');
   const dash = await manager('GET', '/api/reports/dashboard');
   ok(dash.status === 200 && dash.data.admits_ok_today >= 2, 'dashboard reflects admits');
   const csv = await fetch(base + `/api/reports/sales?from=${d}&to=${d}&format=csv`, { headers: { cookie: jars.manager } });
@@ -202,9 +273,9 @@ async function main() {
   ok(grouped.status === 200, 'grouped sales report loads');
   const gsec = grouped.data.sections[0];
   const dayTix = gsec.rows.find((r) => r.group === 'Day Tickets');
-  // 4 ADULT sold today: 2 in the (since refunded) POS order + 1 web + 1 voucher —
-  // refunded orders still count on their paid day.
-  ok(dayTix && dayTix.units === 4 && dayTix.gross_cents === 4 * adult.price_cents,
+  // 6 ADULT sold today: 2 in the (since refunded) POS order + 1 web + 1 voucher
+  // + 2 in the partial-refund order — sold units count on their paid day.
+  ok(dayTix && dayTix.units === 6 && dayTix.gross_cents === 6 * adult.price_cents,
     "'Day Tickets' group gross equals the day's ADULT gross");
   const ungrouped = gsec.rows.find((r) => r.group === 'Ungrouped');
   ok(ungrouped && ungrouped.units > 0, 'Ungrouped row absorbs products in no group (PLNTM, MEM-EXP)');
@@ -291,7 +362,14 @@ async function main() {
   ok(snap.prepare('PRAGMA integrity_check').get().integrity_check === 'ok', 'snapshot passes integrity_check');
   const snapPay = snap.prepare('SELECT COALESCE(SUM(amount_cents - change_cents),0) AS s FROM payments').get().s;
   const snapPaid = snap.prepare("SELECT COALESCE(SUM(total_cents),0) AS s FROM orders WHERE status='paid'").get().s;
-  ok(snapPay === snapPaid, 'snapshot payments reconcile with its own paid orders');
+  const snapPartial = snap.prepare(
+    `SELECT COALESCE(SUM(o.total_cents), 0)
+          - COALESCE((SELECT SUM(r.total_cents) FROM refunds r
+                      JOIN orders po ON po.id = r.order_id
+                      WHERE po.status = 'partial_refund'), 0) AS s
+     FROM orders o WHERE o.status = 'partial_refund'`
+  ).get().s;
+  ok(snapPay === snapPaid + snapPartial, 'snapshot payments reconcile with its own live orders');
   snap.close();
   const bkList = await admin('GET', '/api/backups');
   ok(bkList.data.backups.some((b) => b.name === bkRun.data.backup.file), 'snapshot listed');

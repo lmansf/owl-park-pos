@@ -1,62 +1,6 @@
-# pos Specification
+# pos (delta)
 
-## Purpose
-Point of sale: the touch-first sell screen and order lifecycle — build, tender, and
-finalize orders through `pos.finalizeOrder`, the only path that marks orders paid, issues
-tickets, and moves session capacity.
-## Requirements
-### Requirement: Touch-first sell screen
-
-`web/pos.html` (roles cashier/manager/admin) SHALL show a button grid of sellable products,
-a cart with qty edit/remove, discount code entry, and running subtotal/tax/total. Adding an
-event-linked product opens a session picker fed by the availability API. Layout must be
-usable at compact touchscreen resolutions with touch-sized targets.
-
-#### Scenario: Sell two adults and a planetarium entry
-- **WHEN** the cashier taps Adult ×2 and Planetarium, picks the 14:00 session, and totals
-- **THEN** the cart shows 3 lines with correct per-line tax and a grand total.
-
-### Requirement: Tender and finalize
-
-Checkout SHALL accept split tenders drawn from the tender registry. Built-in tenders are
-`cash` (with change calculation) and `card_sim` (always approves, generates a fake auth
-ref); each registry entry declares its method key, label, change behavior, and a
-simulated authorize hook. When tenders cover the total, the order is finalized through
-the shared posting path: order → paid, tickets issued, capacity counted, audit logged.
-Insufficient tender cannot finalize. Adding a tender SHALL NOT require modifying
-`finalizeOrder` or any DDL.
-
-#### Scenario: Cash with change
-- **WHEN** the total is $43.50 and the cashier enters $50 cash
-- **THEN** the order finalizes, change $6.50 is displayed, and a payments row records both
-  amounts.
-
-#### Scenario: New tender is additive
-- **WHEN** a `voucher` tender is registered and used for an exact-amount payment
-- **THEN** the order finalizes through the unchanged posting path and the payments row
-  records method `voucher`.
-
-### Requirement: Tender registry
-
-`GET /api/pos/tenders` SHALL return the active tender list (method, label, change
-behavior) for the POS UI to render. `payments.method` SHALL be validated against the
-registry rather than a schema CHECK, and chart-of-accounts tender mappings keyed by
-method name SHALL apply to registry tenders without accounts-module changes.
-
-#### Scenario: Journal maps a new tender
-- **WHEN** a `voucher` payment is taken and a tender mapping exists for `voucher`
-- **THEN** that day's journal debits the mapped account and still balances.
-
-### Requirement: Receipt and ticket output
-
-After finalize, the POS SHALL show a print-view receipt (order number `P-XXXXXXXX`, lines,
-taxes, tenders, change) and one ticket stub per issued ticket with holder-nameable label,
-validity, session (if any), and the ticket code as text + Code 39 barcode. Browser print
-styling makes each ticket its own page.
-
-#### Scenario: Reprint
-- **WHEN** a cashier opens a past paid order from order search
-- **THEN** the receipt and all ticket stubs can be re-displayed and reprinted.
+## MODIFIED Requirements
 
 ### Requirement: Order management (void/refund)
 
@@ -107,15 +51,7 @@ denied thereafter; remaining tickets stay valid.
   wrong password, or no approver at all)
 - **THEN** the response is 403 `approval_required` and the order is unchanged.
 
-### Requirement: Shared posting path
-
-Order finalization logic (`server/modules/pos.js` exporting `finalizeOrder`) SHALL be the
-only code path that marks orders paid, issues tickets, and mutates session `sold` — used by
-both POS checkout and the online store.
-
-#### Scenario: One invariant set
-- **WHEN** any channel attempts to finalize an order whose session lacks capacity
-- **THEN** the same `capacity` error and rollback behavior occurs regardless of channel.
+## ADDED Requirements
 
 ### Requirement: Session exchange
 
@@ -136,4 +72,3 @@ independent path.
 - **WHEN** a ticket is exchanged to a session with zero remaining capacity
 - **THEN** the exchange is rejected with the same `capacity` error as posting, and the
   original ticket remains valid.
-

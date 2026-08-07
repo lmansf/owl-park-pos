@@ -21,15 +21,30 @@ function migrate(db, migrationsDir) {
   for (const file of files) {
     if (applied.has(file)) continue;
     const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+    // Table rebuilds (the only way SQLite can change a CHECK constraint) follow
+    // the official ALTER TABLE procedure, which requires foreign_keys=OFF for
+    // the duration — that pragma is a no-op inside a transaction, so a
+    // migration opts in via this directive and we compensate with an explicit
+    // foreign_key_check before COMMIT.
+    const fkOff = /^--\s*migrate:\s*foreign_keys=off\s*$/m.test(sql);
+    if (fkOff) db.exec('PRAGMA foreign_keys = OFF');
     db.exec('BEGIN');
     try {
       db.exec(sql);
+      if (fkOff) {
+        const bad = db.prepare('PRAGMA foreign_key_check').all();
+        if (bad.length) {
+          throw new Error(`foreign_key_check found ${bad.length} violation(s)`);
+        }
+      }
       db.prepare('INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)')
         .run(file, new Date().toISOString());
       db.exec('COMMIT');
     } catch (err) {
       db.exec('ROLLBACK');
       throw new Error(`migration ${file} failed: ${err.message}`);
+    } finally {
+      if (fkOff) db.exec('PRAGMA foreign_keys = ON');
     }
   }
 }

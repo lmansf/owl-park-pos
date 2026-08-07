@@ -39,7 +39,9 @@ Simulated card tender today. An SMB needs:
 - Tender reconciliation: settlement/batch reports matched against the daily journal
   (`chart-of-accounts` already balances per day — extend with processor settlement
   import).
-- Refund-to-original-tender flows (builds on proposed `partial-refunds-exchanges`).
+- Refund-to-original-tender flows (shipped: `partial-refunds-exchanges` — refunds
+  allocate across the original tender methods, capped by each method's remaining net;
+  processor-side refund calls arrive with the terminal integration).
 
 ## 3. Data durability and operations
 
@@ -85,7 +87,9 @@ Explicitly out of scope in the demo; an SMB needs:
 - Tax: jurisdiction-correct rates and rounding rules, tax-exempt sales, receipts that
   meet local requirements (business ID, tax breakdown); fiscal-printer/registrar
   requirements in some countries can be a hard blocker to research early.
-- Refund policy enforcement + manager overrides (builds on `partial-refunds-exchanges`).
+- Refund policy enforcement (builds on the shipped `partial-refunds-exchanges` —
+  per-line refunds, session exchanges, and manager-override approval already ship
+  there; policy rules like time windows stay open).
 - Accounting export: map the daily journal (already balanced) to CSV formats the
   business's accountant/software actually ingests (QuickBooks/Xero-style journals).
 - Web store production needs: real email delivery for confirmations (order recovery

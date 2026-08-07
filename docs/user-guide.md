@@ -40,9 +40,15 @@ voucher (always approves); split tenders are fine. Finalizing shows the receipt
 and one printable stub per ticket, barcode included (browser print gives one ticket per
 page). Selling a **membership** prompts for the member's name/email, or search-and-attach
 an existing member to renew. **Order search** (top of page) finds past orders by
-confirmation or customer; any seller can void open orders or refund paid ones (full
-refund: tickets void, seats released), but each void/refund asks a manager or admin to
-type their own credentials as approval — the audit log records both people.
+confirmation or customer; any seller can void open orders or refund paid ones — in full
+or per line: the refund dialog has a quantity stepper per line (**Select all** for the
+classic full refund), refunded tickets void and their session seats free up, and the
+money goes back to the original tenders. A partly refunded order shows a `partial
+refund` badge and can be refunded again later. On the receipt, each still-valid session
+ticket stub offers **Exchange session** — move it to another upcoming session of the
+same event with seats left; the old stub voids and a replacement prints. Every void,
+refund, and exchange asks a manager or admin to type their own credentials as
+approval — the audit log records both people.
 
 ### Admissions (`/admissions.html`)
 The gate. The big input is keyboard-wedge friendly: scan or type a ticket (`T-…`) or
